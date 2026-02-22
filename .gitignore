@@ -12,3 +12,7 @@ venv/
 
 # OS
 .DS_Store
+models/
+data/*.npy
+__pycache__/
+*.pyc
