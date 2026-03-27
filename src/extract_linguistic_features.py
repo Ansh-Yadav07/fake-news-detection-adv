@@ -18,10 +18,10 @@ nltk.download("stopwords")
 
 stop_words = set(stopwords.words("english"))
 
-# Load same 20k subset
+# Load all data
 df = pd.read_csv("data/final_english_dataset.csv")
 df = df.dropna(subset=["text", "label"])
-df = df.iloc[:20000]
+# df = df.iloc[:20000]
 
 features = []
 

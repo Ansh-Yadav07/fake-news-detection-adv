@@ -19,7 +19,7 @@ model.to(device)
 
 embeddings = []
 
-for text in tqdm(df["text"][:20000]):  # limit first 20k for testing
+for text in tqdm(df["text"]):  # process all data
     inputs = tokenizer(
         text,
         return_tensors="pt",
@@ -39,6 +39,6 @@ for text in tqdm(df["text"][:20000]):  # limit first 20k for testing
 embeddings = np.array(embeddings)
 
 np.save("data/bert_embeddings.npy", embeddings)
-df.iloc[:20000][["label"]].to_csv("data/embedding_labels.csv", index=False)
+df[["label"]].to_csv("data/embedding_labels.csv", index=False)
 
 print("Embeddings saved successfully.")

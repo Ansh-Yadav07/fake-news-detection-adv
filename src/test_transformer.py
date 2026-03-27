@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import sys
 from transformers import DistilBertTokenizerFast, DistilBertForSequenceClassification
 import torch.nn.functional as F
 
@@ -39,14 +40,22 @@ def predict(text):
     return label_map[predicted_class], confidence
 
 
-# ===== Test on custom inputs =====
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        text = " ".join(sys.argv[1:])
+        label, confidence = predict(text)
+        print(f"\nPrediction: {label}")
+        print(f"Confidence: {confidence:.2%}")
+    else:
+        while True:
+            try:
+                text = input("\nEnter news text (or type 'exit'): ")
+                if not text or text.lower().strip() == "exit":
+                    break
+            except EOFError:
+                break
 
-while True:
-    text = input("\nEnter news text (or type 'exit'): ")
-    if text.lower() == "exit":
-        break
-
-    label, confidence = predict(text)
-    print(f"\nPrediction: {label}")
-    print(f"Confidence: {confidence*100:.2f}%")
+            label, confidence = predict(text)
+            print(f"\nPrediction: {label}")
+            print(f"Confidence: {confidence:.2%}")
     
