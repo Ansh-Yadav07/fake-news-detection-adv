@@ -23,7 +23,7 @@ except Exception as e:
     stop_words = set()
 
 # ---- Load Models ----
-MODEL_PATH = "models/transformer"
+MODEL_PATH = "anshy047/fake-news-detector-transformer"
 HYBRID_MODEL_PATH = "models/hybrid/hybrid_clf.pkl"
 SCALer_PATH = "models/hybrid/scaler.pkl"
 
