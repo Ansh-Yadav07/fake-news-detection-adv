@@ -19,31 +19,33 @@ const DemoSection = () => {
     setResult(null);
 
     try {
-      // Mocked latency response for Dashboard View
-      await new Promise(r => setTimeout(r, 2000));
+      const response = await fetch('https://fake-news-detection-adv.onrender.com/predict', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: input.trim() })
+      });
+
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
+      }
+
+      const apiData = await response.json();
       
       const words = input.trim().split(/\s+/);
       const wordCount = words.length;
-      
-      // Calculate normalized feature scales (0-1) for decision logic based on text
-      // These would ideally come directly from your Flask backend
-      const uppercaseRatio = input.replace(/[^A-Z]/g, '').length / Math.max(1, input.length);
-      const punctRatio = input.replace(/[^.!?]/g, '').length / Math.max(1, input.length);
-      
-      const isSus = uppercaseRatio > 0.15 || punctRatio > 0.15 || input.toLowerCase().includes('breaking');
-      
-      // Mocked outputs as decimals
-      const t_conf = isSus ? 0.94 : 0.88;
-      const t_label = isSus ? 'FAKE' : (input.length % 2 === 0 ? 'REAL' : 'FAKE');
-      
-      const h_conf = isSus ? 0.89 : 0.76;
-      const h_label = isSus ? 'FAKE' : 'REAL';
 
-      const mockFeatures = {
-        clickbait: isSus ? 0.85 : 0.24,
-        uppercase: uppercaseRatio,
-        punctuation: punctRatio,
-        complexity: isSus ? 4.5 : 7.8 // 0-10 scale
+      // Extract from the Real API
+      const t_conf = apiData.transformer.confidence;
+      const t_label = apiData.transformer.label;
+      const h_conf = apiData.hybrid.confidence;
+      const h_label = apiData.hybrid.label;
+      const rawFeatures = apiData.raw_features || {};
+
+      const computedFeatures = {
+        clickbait: rawFeatures.clickbait || 0.24,
+        uppercase: rawFeatures.uppercase || 0,
+        punctuation: rawFeatures.punctuation || 0,
+        complexity: rawFeatures.complexity || 5
       };
 
       // 1. Calculate Agreement
@@ -57,9 +59,9 @@ const DemoSection = () => {
       }
       
       // 3. Dynamic Explanations
-      const explanations = generateExplanations(mockFeatures, t_label, h_label, finalVerdictLabel);
+      const explanations = generateExplanations(computedFeatures, t_label, h_label, finalVerdictLabel);
 
-      const mockedData = {
+      const dashboardData = {
         transformer: { 
           label: t_label, 
           confidence: t_conf * 100 // mapped to percentages for UI display
@@ -71,14 +73,14 @@ const DemoSection = () => {
         stats: {
           wordCount: wordCount,
           avgWordLength: (input.length / Math.max(1, wordCount)).toFixed(1),
-          upperRatio: Math.round(uppercaseRatio * 100),
-          punctDensity: Math.round(punctRatio * 100)
+          upperRatio: Math.round(computedFeatures.uppercase * 100),
+          punctDensity: Math.round(computedFeatures.punctuation * 100)
         },
         features: {
-          punctuation: Math.round(mockFeatures.punctuation * 100), // scale to 100 for UI bar
-          uppercase: Math.round(mockFeatures.uppercase * 100),
-          complexity: mockFeatures.complexity, // remains 0-10
-          clickbait: Math.round(mockFeatures.clickbait * 100)
+          punctuation: Math.round(computedFeatures.punctuation * 100), // scale to 100 for UI bar
+          uppercase: Math.round(computedFeatures.uppercase * 100),
+          complexity: computedFeatures.complexity, // remains 0-10
+          clickbait: Math.round(computedFeatures.clickbait * 100)
         },
         agreementScore: Math.round(agreementRaw * 100),
         robustnessScore: 8.5,
@@ -87,10 +89,10 @@ const DemoSection = () => {
         explanations: explanations
       };
       
-      setResult(mockedData);
+      setResult(dashboardData);
     } catch (err) {
       console.error(err);
-      alert("Failed to connect to the backend.");
+      alert("Failed to connect to the backend API.");
     } finally {
       setLoading(false);
     }
