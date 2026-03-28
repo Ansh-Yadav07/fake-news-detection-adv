@@ -1,5 +1,11 @@
 import React, { useState } from 'react';
-import { AlertCircle, ArrowRight, Loader2 } from 'lucide-react';
+import { ArrowRight, Loader2, Sparkles } from 'lucide-react';
+import ChartSection from './analyzer/ChartSection';
+import StatsGrid from './analyzer/StatsGrid';
+import FeatureBars from './analyzer/FeatureBars';
+import VerdictPanel from './analyzer/VerdictPanel';
+import InsightsList from './analyzer/InsightsList';
+import { getFinalVerdict, calculateAgreement, generateExplanations, getWeightedFusion } from '../utils/decisionLogic';
 
 const DemoSection = () => {
   const [input, setInput] = useState('');
@@ -13,23 +19,72 @@ const DemoSection = () => {
     setResult(null);
 
     try {
-      // TODO: Replace with proper Fetch to your Flask backend:
-      // const res = await fetch('/predict', {
-      //   method: 'POST',
-      //   headers: { 'Content-Type': 'application/json' },
-      //   body: JSON.stringify({ text: input })
-      // });
-      // const data = await res.json();
+      // Mocked latency response for Dashboard View
+      await new Promise(r => setTimeout(r, 2000));
       
-      // Mocked latency response
-      await new Promise(r => setTimeout(r, 1800));
+      const words = input.trim().split(/\s+/);
+      const wordCount = words.length;
+      
+      // Calculate normalized feature scales (0-1) for decision logic based on text
+      // These would ideally come directly from your Flask backend
+      const uppercaseRatio = input.replace(/[^A-Z]/g, '').length / Math.max(1, input.length);
+      const punctRatio = input.replace(/[^.!?]/g, '').length / Math.max(1, input.length);
+      
+      const isSus = uppercaseRatio > 0.15 || punctRatio > 0.15 || input.toLowerCase().includes('breaking');
+      
+      // Mocked outputs as decimals
+      const t_conf = isSus ? 0.94 : 0.88;
+      const t_label = isSus ? 'FAKE' : (input.length % 2 === 0 ? 'REAL' : 'FAKE');
+      
+      const h_conf = isSus ? 0.89 : 0.76;
+      const h_label = isSus ? 'FAKE' : 'REAL';
+
+      const mockFeatures = {
+        clickbait: isSus ? 0.85 : 0.24,
+        uppercase: uppercaseRatio,
+        punctuation: punctRatio,
+        complexity: isSus ? 4.5 : 7.8 // 0-10 scale
+      };
+
+      // 1. Calculate Agreement
+      const agreementRaw = calculateAgreement(t_conf, h_conf, t_label, h_label);
+      
+      // 2. Final Verdict Logic
+      let finalVerdictLabel = getFinalVerdict(t_label, t_conf, h_label, h_conf);
+      if (agreementRaw > 0.7 && finalVerdictLabel === 'UNCERTAIN') {
+         // Fallback if agreement is high but logic returned uncertain
+         finalVerdictLabel = t_conf > h_conf ? t_label : h_label;
+      }
+      
+      // 3. Dynamic Explanations
+      const explanations = generateExplanations(mockFeatures, t_label, h_label, finalVerdictLabel);
+
       const mockedData = {
-        transformer: { label: input.length % 2 === 0 ? 'REAL' : 'FAKE', confidence: 94.2 },
-        hybrid: { label: 'FAKE', confidence: 81.5 },
-        explanations: [
-          "High punctuation (exclamation marks) -> possible fake/clickbait pattern",
-          "High uppercase ratio -> common in sensationalism"
-        ]
+        transformer: { 
+          label: t_label, 
+          confidence: t_conf * 100 // mapped to percentages for UI display
+        },
+        hybrid: { 
+          label: h_label, 
+          confidence: h_conf * 100 
+        },
+        stats: {
+          wordCount: wordCount,
+          avgWordLength: (input.length / Math.max(1, wordCount)).toFixed(1),
+          upperRatio: Math.round(uppercaseRatio * 100),
+          punctDensity: Math.round(punctRatio * 100)
+        },
+        features: {
+          punctuation: Math.round(mockFeatures.punctuation * 100), // scale to 100 for UI bar
+          uppercase: Math.round(mockFeatures.uppercase * 100),
+          complexity: mockFeatures.complexity, // remains 0-10
+          clickbait: Math.round(mockFeatures.clickbait * 100)
+        },
+        agreementScore: Math.round(agreementRaw * 100),
+        robustnessScore: 8.5,
+        finalVerdictLabel: finalVerdictLabel,
+        verdictExplanation: explanations.length > 0 ? explanations[0] : "Analysis complete.",
+        explanations: explanations
       };
       
       setResult(mockedData);
@@ -42,105 +97,74 @@ const DemoSection = () => {
   };
 
   return (
-    <section id="demo" className="py-20 px-6 max-w-4xl mx-auto">
-      <div className="glass-card p-6 md:p-10 text-left">
-        <h3 className="text-2xl font-bold tracking-tight mb-2">Live Analysis</h3>
-        <p className="text-zinc-500 text-sm mb-6">Enter an article snippet or headline below to evaluate.</p>
-        
-        <div className="mb-6 relative">
+    <section id="demo" className="py-10 px-6 max-w-6xl mx-auto">
+      <div className="text-center mb-12 animate-in fade-in slide-in-from-bottom-4 duration-700">
+        <div className="inline-flex items-center gap-2 px-3 py-1.5 mb-6 rounded-full bg-zinc-100 border border-zinc-200 text-xs font-semibold tracking-wide text-zinc-600 shadow-sm">
+          <Sparkles className="w-4 h-4" />
+          Intelligence Dashboard
+        </div>
+        <h2 className="text-3xl md:text-5xl font-black tracking-tight mb-4 text-zinc-900">
+          Content Analysis Engine
+        </h2>
+        <p className="text-zinc-500 max-w-xl mx-auto text-sm md:text-base font-medium">
+          Paste your article or headline below. Our dual-model pipeline will process linguistic markers, analyze syntactic complexity, and establish a multi-layered truthfulness verdict.
+        </p>
+      </div>
+
+      <div className="glass-card p-6 md:p-8 rounded-3xl bg-white/70 shadow-xl border border-black/5 ring-1 ring-black/5 mb-12 mx-auto max-w-4xl relative z-10 transition-all">
+        <div className="relative mb-6">
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="Paste text here... (e.g. 'BREAKING: Secret documents exposed!')"
-            className="w-full min-h-[160px] p-5 rounded-2xl bg-white/50 border border-black/10 text-zinc-900 placeholder:text-zinc-400 focus:outline-none focus:ring-4 focus:ring-black/5 focus:border-black/20 focus:bg-white transition-all resize-y text-base font-medium"
+            className="w-full min-h-[160px] p-6 rounded-2xl bg-white/80 border border-zinc-200 text-zinc-900 placeholder:text-zinc-400 focus:outline-none focus:ring-4 focus:ring-zinc-900/5 focus:border-zinc-300 focus:bg-white transition-all resize-y text-base md:text-lg font-medium shadow-inner"
           />
         </div>
 
-        <button 
-          onClick={handleAnalyze} 
-          disabled={loading || !input.trim()}
-          className="interactive-btn w-full md:w-auto px-8"
-        >
-          {loading ? (
-            <>
-              <Loader2 className="w-5 h-5 animate-spin" />
-              Analyzing...
-            </>
-          ) : (
-            <>
-              Run Detection
-              <ArrowRight className="w-4 h-4 ml-1" />
-            </>
-          )}
-        </button>
-
-        {/* Results Render */}
-        {result && (
-          <div className="mt-10 pt-8 border-t border-black/10 animate-fade-in">
-            {result.transformer.label !== result.hybrid.label && (
-              <div className="mb-8 p-4 rounded-xl bg-zinc-100 border-l-4 border-zinc-500 flex items-center gap-3">
-                <AlertCircle className="w-5 h-5 text-zinc-600 flex-shrink-0" />
-                <p className="text-sm font-medium text-zinc-800">
-                  Model Disagreement Detected. The semantic interpretation contradicts the linguistic markers. Manual review advised.
-                </p>
-              </div>
+        <div className="flex justify-end">
+          <button 
+            onClick={handleAnalyze} 
+            disabled={loading || !input.trim()}
+            className="w-full md:w-auto px-10 py-4 bg-zinc-900 text-white rounded-xl font-bold tracking-wide hover:bg-zinc-800 focus:ring-4 focus:ring-zinc-900/20 transition-all shadow-lg hover:-translate-y-0.5 disabled:opacity-50 disabled:hover:translate-y-0 flex items-center justify-center gap-2"
+          >
+            {loading ? (
+              <>
+                <Loader2 className="w-5 h-5 animate-spin" />
+                Processing Signal...
+              </>
+            ) : (
+              <>
+                Initialize Analysis
+                <ArrowRight className="w-4 h-4 ml-1" />
+              </>
             )}
-
-            <div className="grid md:grid-cols-2 gap-6 mb-8">
-              {/* Transformer Card */}
-              <div className="bg-white/60 border border-black/5 rounded-2xl p-6">
-                <div className="flex justify-between items-center mb-6">
-                  <span className="text-xs font-bold tracking-wider text-zinc-500 uppercase">Transformer</span>
-                  <span className={`px-3 py-1 rounded-full text-xs font-bold border ${result.transformer.label === 'REAL' ? 'border-zinc-300 bg-zinc-50 text-zinc-900' : 'border-zinc-900 bg-zinc-900 text-white'}`}>
-                    {result.transformer.label}
-                  </span>
-                </div>
-                <div className="text-3xl font-bold tracking-tight mb-1">{result.transformer.confidence.toFixed(1)}%</div>
-                <div className="text-xs text-zinc-500 mb-4">Confidence Score</div>
-                <div className="h-1.5 w-full bg-black/5 rounded-full overflow-hidden">
-                  <div 
-                    className="h-full bg-zinc-900 rounded-full progress-bar-transition"
-                    style={{ width: `${result.transformer.confidence}%` }}
-                  />
-                </div>
-              </div>
-
-              {/* Hybrid Card */}
-              <div className="bg-white/60 border border-black/5 rounded-2xl p-6">
-                <div className="flex justify-between items-center mb-6">
-                  <span className="text-xs font-bold tracking-wider text-zinc-500 uppercase">Hybrid Model</span>
-                  <span className={`px-3 py-1 rounded-full text-xs font-bold border ${result.hybrid.label === 'REAL' ? 'border-zinc-300 bg-zinc-50 text-zinc-900' : 'border-zinc-900 bg-zinc-900 text-white'}`}>
-                    {result.hybrid.label}
-                  </span>
-                </div>
-                <div className="text-3xl font-bold tracking-tight mb-1">{result.hybrid.confidence.toFixed(1)}%</div>
-                <div className="text-xs text-zinc-500 mb-4">Confidence Score</div>
-                <div className="h-1.5 w-full bg-black/5 rounded-full overflow-hidden">
-                  <div 
-                    className="h-full bg-zinc-900 rounded-full progress-bar-transition"
-                    style={{ width: `${result.hybrid.confidence}%` }}
-                  />
-                </div>
-              </div>
-            </div>
-
-            {/* Explanation Area */}
-            {result.explanations && result.explanations.length > 0 && (
-              <div className="bg-white/40 border border-black/5 p-6 rounded-2xl">
-                <h4 className="text-sm font-bold text-zinc-900 mb-4">Linguistic Markers & Explanations</h4>
-                <ul className="space-y-3">
-                  {result.explanations.map((exp, idx) => (
-                    <li key={idx} className="flex items-start gap-3 text-sm text-zinc-600">
-                      <div className="mt-1 w-1.5 h-1.5 rounded-full bg-zinc-400 flex-shrink-0" />
-                      {exp}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-          </div>
-        )}
+          </button>
+        </div>
       </div>
+
+      {/* Modern Analytics Dashboard Render */}
+      {result && (
+        <div className="animate-in fade-in slide-in-from-bottom-8 duration-700 ease-out space-y-6">
+          <VerdictPanel 
+            label={result.finalVerdictLabel}
+            transformerLabel={result.transformer.label}
+            hybridLabel={result.hybrid.label}
+            explanation={result.verdictExplanation}
+            agreementScore={result.agreementScore}
+            robustnessScore={result.robustnessScore}
+          />
+
+          <div className="grid md:grid-cols-3 gap-6">
+            <ChartSection transformerConf={result.transformer.confidence} hybridConf={result.hybrid.confidence} />
+            <FeatureBars {...result.features} />
+            <StatsGrid {...result.stats} />
+          </div>
+
+          <div className="grid grid-cols-1">
+            <InsightsList explanations={result.explanations} />
+          </div>
+        </div>
+      )}
     </section>
   );
 };
