@@ -28,11 +28,14 @@ HYBRID_MODEL_PATH = "models/hybrid/hybrid_clf.pkl"
 SCALer_PATH = "models/hybrid/scaler.pkl"
 
 print("Loading Transformer model...")
-device = torch.device("mps" if torch.backends.mps.is_available() else "cpu" if not torch.cuda.is_available() else "cuda")
+# Keep it strictly to CPU to save memory on Render's 512MB tier
+device = torch.device("cpu")
+torch.set_num_threads(1) # Limit PyTorch threads to reduce memory overhead
+
 tokenizer = DistilBertTokenizerFast.from_pretrained(MODEL_PATH)
-transformer_model = DistilBertForSequenceClassification.from_pretrained(MODEL_PATH)
+# Use low_cpu_mem_usage to drastically reduce RAM spikes when loading
+transformer_model = DistilBertForSequenceClassification.from_pretrained(MODEL_PATH, low_cpu_mem_usage=True)
 transformer_model.eval()
-transformer_model.to(device)
 
 print("Loading Hybrid ML model...")
 hybrid_clf = joblib.load(HYBRID_MODEL_PATH)
