@@ -16,3 +16,9 @@ models/
 data/*.npy
 __pycache__/
 *.pyc
+venv/
+node_modules/
+__pycache__/
+*.pyc
+data/
+*.npymodels/transformer/checkpoint-*/
