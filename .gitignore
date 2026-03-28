@@ -4,7 +4,8 @@ __pycache__/
 
 # Data & models
 data/
-models/
+models/*
+!models/hybrid/
 
 # Virtual env
 venv/
