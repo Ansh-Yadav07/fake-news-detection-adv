@@ -85,28 +85,29 @@ def get_hf_classification(text):
         result = hf_client.text_classification(text, model=MODEL_ID)
         return result
     except Exception as e:
+        print(f"DEBUG: HF Classification failed: {str(e)}")
         raise Exception(f"HF Classification API Error: {str(e)}")
 
 def get_hf_embeddings(text):
     """
     Extract embeddings from HF inference API.
-    For classification models, use feature extraction method if available.
+    For classification models, this is optional.
     Falls back to zeros if embeddings can't be extracted.
     """
     if not hf_client:
         # If client not initialized, return zero embeddings
+        print("DEBUG: HF Client not available, using zero embeddings")
         return np.zeros(768)
     
     try:
         # Try feature extraction using the model
-        # The InferenceClient feature_extraction method gets text embeddings
         result = hf_client.feature_extraction(text, model=MODEL_ID)
         
         if isinstance(result, list) and len(result) > 0:
             if isinstance(result[0], (list, tuple)):
                 # Result is [embedding_vector]
                 embeddings = np.array(result[0], dtype=np.float32)
-                # Ensure we have 768 dimensions (pad or truncate as needed)
+                # Ensure we have 768 dimensions
                 if len(embeddings) < 768:
                     embeddings = np.pad(embeddings, (0, 768 - len(embeddings)), 'constant')
                 else:
@@ -114,10 +115,11 @@ def get_hf_embeddings(text):
                 return embeddings
         
         # If we can't parse embeddings, return zeros
+        print("DEBUG: Could not parse embeddings from result")
         return np.zeros(768)
     except Exception as e:
         # Silently fall back to zeros on any error
-        print(f"DEBUG: Could not extract embeddings: {e}")
+        print(f"DEBUG: Embeddings extraction failed: {str(e)}")
         return np.zeros(768)
 
 @app.route('/', methods=['GET'])
@@ -133,46 +135,62 @@ def predict():
     text = data['text']
     
     try:
-        # 1. Remote Transformer Prediction via HF Inference API
-        hf_result = get_hf_classification(text)
+        # 1. Try Remote Transformer Prediction via HF Inference API
+        t_label = None
+        t_conf = None
+        transformer_available = False
         
-        if isinstance(hf_result, list) and len(hf_result) > 0 and isinstance(hf_result[0], list):
-            predictions = hf_result[0]
-        elif isinstance(hf_result, list):
-            predictions = hf_result
-        elif hasattr(hf_result, "get") and hf_result.get("error"):
-            raise Exception(f"HF Model Error: {hf_result.get('error')}")
-        else:
-            raise Exception("Unexpected HF formatting")
+        try:
+            hf_result = get_hf_classification(text)
+            
+            if isinstance(hf_result, list) and len(hf_result) > 0 and isinstance(hf_result[0], list):
+                predictions = hf_result[0]
+            elif isinstance(hf_result, list):
+                predictions = hf_result
+            elif hasattr(hf_result, "get") and hf_result.get("error"):
+                raise Exception(f"HF Model Error: {hf_result.get('error')}")
+            else:
+                raise Exception("Unexpected HF formatting")
 
-        # Get label with highest score
-        best_pred = max(predictions, key=lambda x: x['score'])
-        t_label_raw = best_pred['label']
-        t_conf = best_pred['score']
-        
-        # Map labels
-        t_label = "REAL" if t_label_raw in ["LABEL_1", "1", "REAL"] else "FAKE"
+            # Get label with highest score
+            best_pred = max(predictions, key=lambda x: x['score'])
+            t_label_raw = best_pred['label']
+            t_conf = best_pred['score']
+            
+            # Map labels
+            t_label = "REAL" if t_label_raw in ["LABEL_1", "1", "REAL"] else "FAKE"
+            transformer_available = True
+        except Exception as e:
+            print(f"Transformer API Error: {str(e)} - Will use hybrid model only")
+            t_label = None
+            t_conf = None
         
         # 2. Extract local Linguistic Features
         ling_feats, uppercase_ratio, punct_ratio = extract_features(text)
         
-        # 3. Get remote Embeddings for Hybrid Model
+        # 3. Get embeddings if transformer is available, otherwise use zeros
         cls_embedding = None
-        try:
-            raw_embed = get_hf_embeddings(text)
-            cls_embedding = raw_embed.flatten()
-            
-            if cls_embedding.shape[0] != 768:
-                raise ValueError(f"Shape error: {cls_embedding.shape}")
+        if transformer_available:
+            try:
+                raw_embed = get_hf_embeddings(text)
+                cls_embedding = raw_embed.flatten()
                 
-        except Exception as e:
-            print(f"Warning: Could not fetch embeddings, using zero fallback: {str(e)}")
+                if cls_embedding.shape[0] != 768:
+                    raise ValueError(f"Shape error: {cls_embedding.shape}")
+                    
+            except Exception as e:
+                print(f"Warning: Could not fetch embeddings, using zero fallback: {str(e)}")
+                cls_embedding = np.zeros(768)
+        else:
+            # No transformer available, use zero embeddings
             cls_embedding = np.zeros(768)
 
         # Combine embedding and linguistic features for Hybrid Local execution
         combined_features = np.hstack((cls_embedding, np.array(ling_feats)))
         
         # Local Hybrid Prediction
+        h_label = None
+        h_conf = None
         if hybrid_clf and scaler:
             combined_scaled = scaler.transform(combined_features.reshape(1, -1))
             h_probs = hybrid_clf.predict_proba(combined_scaled)[0]
@@ -180,9 +198,18 @@ def predict():
             h_conf = float(h_probs[h_pred_class])
             h_label = "REAL" if h_pred_class == 1 else "FAKE"
         else:
-            # Fallback if hybrid models not loaded
-            h_label = t_label
-            h_conf = t_conf
+            # Fallback: use transformer result if available, otherwise default
+            if t_label:
+                h_label = t_label
+                h_conf = t_conf
+            else:
+                h_label = "UNKNOWN"
+                h_conf = 0.5
+        
+        # If transformer failed, use hybrid result for transformer too
+        if not transformer_available:
+            t_label = h_label
+            t_conf = h_conf
         
         # Stats for frontend visualization
         word_count = len(text.split())
@@ -191,11 +218,11 @@ def predict():
         payload = {
             "transformer": {
                 "label": t_label,
-                "confidence": t_conf
+                "confidence": float(t_conf)
             },
             "hybrid": {
                 "label": h_label,
-                "confidence": h_conf
+                "confidence": float(h_conf)
             },
             "raw_features": {
                 "uppercase": float(uppercase_ratio),
