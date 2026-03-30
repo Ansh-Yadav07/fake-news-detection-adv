@@ -19,7 +19,7 @@ const DemoSection = () => {
     setResult(null);
 
     try {
-      const response = await fetch('https://fake-news-detection-5.onrender.com/predict', {
+      const response = await fetch('https://fake-news-detection-5gpf.onrender.com/predict', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: input.trim() })
