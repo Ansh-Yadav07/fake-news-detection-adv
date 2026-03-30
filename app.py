@@ -39,15 +39,24 @@ MODEL_PATH = "models/hybrid/hybrid_clf.pkl"
 SCALER_PATH = "models/hybrid/scaler.pkl"
 
 print("Loading local Hybrid ML model...")
+hybrid_clf = None
+scaler = None
 try:
     hybrid_clf = joblib.load(MODEL_PATH)
     scaler = joblib.load(SCALER_PATH)
-    print("Local models loaded successfully! Transformer running remotely via HF API.")
+    print(f"Local models loaded successfully! Type: {type(hybrid_clf)}, {type(scaler)}")
+    print("Transformer running remotely via HF API.")
+except FileNotFoundError as e:
+    print(f"ERROR: Model file not found: {e}")
 except Exception as e:
-    print(f"ERROR loading hybrid models: {str(e)}")
-    print("WARNING: Hybrid model will not be available!")
-    hybrid_clf = None
-    scaler = None
+    print(f"ERROR loading hybrid models: {type(e).__name__}: {str(e)}")
+    import traceback
+    traceback.print_exc()
+finally:
+    if not hybrid_clf:
+        print("WARNING: Hybrid model will not be available - using only zero embeddings")
+    if not scaler:
+        print("WARNING: Scaler not available")
 
 def extract_features(text):
     words = text.split()
