@@ -7,6 +7,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import nltk
 from nltk.corpus import stopwords
+from huggingface_hub import InferenceClient
 
 # ---- Initialization and Setup ----
 app = Flask(__name__)
@@ -23,10 +24,16 @@ except Exception as e:
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 if not HF_TOKEN:
     print("WARNING: HF_TOKEN environment variable not set!")
-# Use the new HF Router API instead of the deprecated api-inference endpoint
-API_URL = "https://router.huggingface.co/models/anshy047/fake-news-detector-transformer"
-FEAT_URL = "https://router.huggingface.co/models/anshy047/fake-news-detector-transformer"
-HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"}
+
+# Initialize HF Inference Client (handles all API complexity internally)
+try:
+    hf_client = InferenceClient(api_key=HF_TOKEN)
+    print("HF Inference Client initialized successfully!")
+except Exception as e:
+    print(f"WARNING: Failed to initialize HF Inference Client: {e}")
+    hf_client = None
+
+MODEL_ID = "anshy047/fake-news-detector-transformer"
 
 MODEL_PATH = "models/hybrid/hybrid_clf.pkl"
 SCALER_PATH = "models/hybrid/scaler.pkl"
@@ -70,31 +77,48 @@ def extract_features(text):
 
 
 def get_hf_classification(text):
-    """Call HF inference API for sequence classification"""
-    response = requests.post(API_URL, headers=HEADERS, json={"inputs": text})
-    if response.status_code != 200:
-        raise Exception(f"HF Classification API Error: {response.text}")
-    return response.json()
+    """Call HF inference API for sequence classification using InferenceClient"""
+    if not hf_client:
+        raise Exception("HF Inference Client not initialized")
+    
+    try:
+        result = hf_client.text_classification(text, model=MODEL_ID)
+        return result
+    except Exception as e:
+        raise Exception(f"HF Classification API Error: {str(e)}")
 
 def get_hf_embeddings(text):
-    """Call HF inference API for feature extraction via new Router API"""
-    # The router API supports the same endpoint but we extract embeddings from the hidden output
-    payload = {"inputs": text}
-    response = requests.post(FEAT_URL, headers=HEADERS, json=payload)
-    if response.status_code != 200:
-        raise Exception(f"HF Embeddings API Error: {response.text}")
+    """
+    Extract embeddings from HF inference API.
+    For classification models, use feature extraction method if available.
+    Falls back to zeros if embeddings can't be extracted.
+    """
+    if not hf_client:
+        # If client not initialized, return zero embeddings
+        return np.zeros(768)
     
-    data = response.json()
-    
-    # For text classification models, we often get the raw logits
-    # We'll fall back to zeros if we can't extract proper embeddings
-    if isinstance(data, list) and len(data) > 0:
-        # If it's a list of lists, try to extract the first embedding
-        if isinstance(data[0], list) and len(data[0]) > 0 and isinstance(data[0][0], (int, float)):
-            return np.array(data[0][:768])  # Take first 768 dims if available
-    
-    # Fallback: return zeros if we can't parse embeddings
-    return np.zeros(768)
+    try:
+        # Try feature extraction using the model
+        # The InferenceClient feature_extraction method gets text embeddings
+        result = hf_client.feature_extraction(text, model=MODEL_ID)
+        
+        if isinstance(result, list) and len(result) > 0:
+            if isinstance(result[0], (list, tuple)):
+                # Result is [embedding_vector]
+                embeddings = np.array(result[0], dtype=np.float32)
+                # Ensure we have 768 dimensions (pad or truncate as needed)
+                if len(embeddings) < 768:
+                    embeddings = np.pad(embeddings, (0, 768 - len(embeddings)), 'constant')
+                else:
+                    embeddings = embeddings[:768]
+                return embeddings
+        
+        # If we can't parse embeddings, return zeros
+        return np.zeros(768)
+    except Exception as e:
+        # Silently fall back to zeros on any error
+        print(f"DEBUG: Could not extract embeddings: {e}")
+        return np.zeros(768)
 
 @app.route('/', methods=['GET'])
 def health():
