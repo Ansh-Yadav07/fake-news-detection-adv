@@ -91,6 +91,10 @@ def get_hf_embeddings(text):
         
     return np.array(data)
 
+@app.route('/', methods=['GET'])
+def health():
+    return jsonify({"status": "API is running"}), 200
+
 @app.route('/predict', methods=['POST'])
 def predict():
     data = request.get_json()
