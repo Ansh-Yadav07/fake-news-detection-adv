@@ -7,12 +7,6 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import nltk
 from nltk.corpus import stopwords
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-import requests
-
-app = Flask(__name__)
-CORS(app)
 
 # ---- Initialization and Setup ----
 app = Flask(__name__)
@@ -26,9 +20,9 @@ except Exception as e:
     stop_words = set()
 
 # ---- Constants & API Config ----
-HF_TOKEN = os.environ.get("HF_TOKEN", "")  # Read from environment variable on Render
+HF_TOKEN = os.environ.get("HF_TOKEN", "")
 if not HF_TOKEN:
-    raise ValueError("HF_TOKEN environment variable not set. Please set it on Render dashboard.")
+    print("WARNING: HF_TOKEN environment variable not set!")
 API_URL = "https://api-inference.huggingface.co/models/anshy047/fake-news-detector-transformer"
 FEAT_URL = "https://api-inference.huggingface.co/pipeline/feature-extraction/anshy047/fake-news-detector-transformer"
 HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"}
