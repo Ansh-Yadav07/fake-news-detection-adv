@@ -31,9 +31,15 @@ MODEL_PATH = "models/hybrid/hybrid_clf.pkl"
 SCALER_PATH = "models/hybrid/scaler.pkl"
 
 print("Loading local Hybrid ML model...")
-hybrid_clf = joblib.load(MODEL_PATH)
-scaler = joblib.load(SCALER_PATH)
-print("Local models loaded successfully! Transformer running remotely via HF API.")
+try:
+    hybrid_clf = joblib.load(MODEL_PATH)
+    scaler = joblib.load(SCALER_PATH)
+    print("Local models loaded successfully! Transformer running remotely via HF API.")
+except Exception as e:
+    print(f"ERROR loading hybrid models: {str(e)}")
+    print("WARNING: Hybrid model will not be available!")
+    hybrid_clf = None
+    scaler = None
 
 def extract_features(text):
     words = text.split()
@@ -132,13 +138,18 @@ def predict():
 
         # Combine embedding and linguistic features for Hybrid Local execution
         combined_features = np.hstack((cls_embedding, np.array(ling_feats)))
-        combined_scaled = scaler.transform(combined_features.reshape(1, -1))
         
         # Local Hybrid Prediction
-        h_probs = hybrid_clf.predict_proba(combined_scaled)[0]
-        h_pred_class = np.argmax(h_probs)
-        h_conf = float(h_probs[h_pred_class])
-        h_label = "REAL" if h_pred_class == 1 else "FAKE"
+        if hybrid_clf and scaler:
+            combined_scaled = scaler.transform(combined_features.reshape(1, -1))
+            h_probs = hybrid_clf.predict_proba(combined_scaled)[0]
+            h_pred_class = np.argmax(h_probs)
+            h_conf = float(h_probs[h_pred_class])
+            h_label = "REAL" if h_pred_class == 1 else "FAKE"
+        else:
+            # Fallback if hybrid models not loaded
+            h_label = t_label
+            h_conf = t_conf
         
         # Stats for frontend visualization
         word_count = len(text.split())
