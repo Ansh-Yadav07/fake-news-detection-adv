@@ -27,7 +27,7 @@ if not HF_TOKEN:
 
 # Initialize HF Inference Client (handles all API complexity internally)
 try:
-    hf_client = InferenceClient(api_key=HF_TOKEN)
+    hf_client = InferenceClient(token=HF_TOKEN) if HF_TOKEN else InferenceClient()
     print("HF Inference Client initialized successfully!")
 except Exception as e:
     print(f"WARNING: Failed to initialize HF Inference Client: {e}")
