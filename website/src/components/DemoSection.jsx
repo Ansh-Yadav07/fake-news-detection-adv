@@ -19,7 +19,8 @@ const DemoSection = () => {
     setResult(null);
 
     try {
-      const response = await fetch('https://fake-news-detection-5gpf.onrender.com/predict', {
+      const apiUrl = import.meta.env.VITE_API_URL || 'https://fake-news-detection-5gpf.onrender.com/predict';
+      const response = await fetch(apiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: input.trim() })
