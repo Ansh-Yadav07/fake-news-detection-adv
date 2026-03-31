@@ -25,38 +25,33 @@ HF_TOKEN = os.environ.get("HF_TOKEN", "")
 if not HF_TOKEN:
     print("WARNING: HF_TOKEN environment variable not set!")
 
-# Initialize HF Inference Client (handles all API complexity internally)
-try:
-    hf_client = InferenceClient(token=HF_TOKEN) if HF_TOKEN else InferenceClient()
-    print("HF Inference Client initialized successfully!")
-except Exception as e:
-    print(f"WARNING: Failed to initialize HF Inference Client: {e}")
-    hf_client = None
-
+# Don't initialize HF Inference Client - it causes timeouts on Render
+# We'll use the hybrid model only for now
+hf_client = None
 MODEL_ID = "anshy047/fake-news-detector-transformer"
 
-MODEL_PATH = "models/hybrid/hybrid_clf.pkl"
-SCALER_PATH = "models/hybrid/scaler.pkl"
+MODEL_PATH = "models/ml_lr_model.pkl"
+TFIDF_PATH = "models/ml_tfidf.pkl"
 
-print("Loading local Hybrid ML model...")
+print("Loading local ML model...")
 hybrid_clf = None
-scaler = None
+tfidf = None
 try:
     hybrid_clf = joblib.load(MODEL_PATH)
-    scaler = joblib.load(SCALER_PATH)
-    print(f"Local models loaded successfully! Type: {type(hybrid_clf)}, {type(scaler)}")
+    tfidf = joblib.load(TFIDF_PATH)
+    print(f"Local model loaded successfully!")
     print("Transformer running remotely via HF API.")
 except FileNotFoundError as e:
     print(f"ERROR: Model file not found: {e}")
 except Exception as e:
-    print(f"ERROR loading hybrid models: {type(e).__name__}: {str(e)}")
+    print(f"ERROR loading ML models: {type(e).__name__}: {str(e)}")
     import traceback
     traceback.print_exc()
 finally:
     if not hybrid_clf:
-        print("WARNING: Hybrid model will not be available - using only zero embeddings")
-    if not scaler:
-        print("WARNING: Scaler not available")
+        print("WARNING: ML model will not be available")
+    if not tfidf:
+        print("WARNING: TFIDF vectorizer not available")
 
 def extract_features(text):
     words = text.split()
@@ -86,50 +81,12 @@ def extract_features(text):
 
 
 def get_hf_classification(text):
-    """Call HF inference API for sequence classification using InferenceClient"""
-    if not hf_client:
-        raise Exception("HF Inference Client not initialized")
-    
-    try:
-        result = hf_client.text_classification(text, model=MODEL_ID)
-        return result
-    except Exception as e:
-        print(f"DEBUG: HF Classification failed: {str(e)}")
-        raise Exception(f"HF Classification API Error: {str(e)}")
+    """Since HF API causes timeouts, we skip this and use hybrid model only"""
+    raise Exception("HF Transformer API disabled - using hybrid model instead")
 
 def get_hf_embeddings(text):
-    """
-    Extract embeddings from HF inference API.
-    For classification models, this is optional.
-    Falls back to zeros if embeddings can't be extracted.
-    """
-    if not hf_client:
-        # If client not initialized, return zero embeddings
-        print("DEBUG: HF Client not available, using zero embeddings")
-        return np.zeros(768)
-    
-    try:
-        # Try feature extraction using the model
-        result = hf_client.feature_extraction(text, model=MODEL_ID)
-        
-        if isinstance(result, list) and len(result) > 0:
-            if isinstance(result[0], (list, tuple)):
-                # Result is [embedding_vector]
-                embeddings = np.array(result[0], dtype=np.float32)
-                # Ensure we have 768 dimensions
-                if len(embeddings) < 768:
-                    embeddings = np.pad(embeddings, (0, 768 - len(embeddings)), 'constant')
-                else:
-                    embeddings = embeddings[:768]
-                return embeddings
-        
-        # If we can't parse embeddings, return zeros
-        print("DEBUG: Could not parse embeddings from result")
-        return np.zeros(768)
-    except Exception as e:
-        # Silently fall back to zeros on any error
-        print(f"DEBUG: Embeddings extraction failed: {str(e)}")
-        return np.zeros(768)
+    """Returns zero embeddings - we use only linguistic features with hybrid model"""
+    return np.zeros(768)
 
 @app.route('/', methods=['GET'])
 def health():
@@ -195,17 +152,17 @@ def predict():
             cls_embedding = np.zeros(768)
 
         # Combine embedding and linguistic features for Hybrid Local execution
-        combined_features = np.hstack((cls_embedding, np.array(ling_feats)))
         
-        # Local Hybrid Prediction
+        # Local ML Prediction using TF-IDF
         h_label = None
         h_conf = None
-        if hybrid_clf and scaler:
-            combined_scaled = scaler.transform(combined_features.reshape(1, -1))
-            h_probs = hybrid_clf.predict_proba(combined_scaled)[0]
+        if hybrid_clf and tfidf:
+            vectorized = tfidf.transform([text])
+            h_probs = hybrid_clf.predict_proba(vectorized)[0]
             h_pred_class = np.argmax(h_probs)
             h_conf = float(h_probs[h_pred_class])
-            h_label = "REAL" if h_pred_class == 1 else "FAKE"
+            # The classes_ are ['FAKE', 'REAL']
+            h_label = hybrid_clf.classes_[h_pred_class]
         else:
             # Fallback: use transformer result if available, otherwise default
             if t_label:
