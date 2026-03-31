@@ -8,6 +8,9 @@ from flask_cors import CORS
 import nltk
 from nltk.corpus import stopwords
 from huggingface_hub import InferenceClient
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ---- Initialization and Setup ----
 app = Flask(__name__)
@@ -80,9 +83,68 @@ def extract_features(text):
     ], uppercase_ratio, punctuation_ratio
 
 
-def get_hf_classification(text):
-    """Since HF API causes timeouts, we skip this and use hybrid model only"""
-    raise Exception("HF Transformer API disabled - using hybrid model instead")
+import time
+
+def get_hf_classification(text, max_retries=3):
+    if not HF_TOKEN:
+        raise Exception("HF_TOKEN is not configured")
+        
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+    API_URL = f"https://api-inference.huggingface.co/pipeline/text-classification/{MODEL_ID}"
+    
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(API_URL, headers=headers, json={"inputs": text}, timeout=15)
+            
+            if response.status_code == 200:
+                result = response.json()
+                
+                # Check for standard expected structures before assuming it worked
+                if isinstance(result, list) and len(result) > 0 and isinstance(result[0], list):
+                    return result  # Good
+                if isinstance(result, list):
+                    return [result] # Also fine
+                    
+                # If there's an error dict from a 200 (rare but possible)
+                if isinstance(result, dict) and "error" in result:
+                    if "loading" in result["error"].lower() or "estimated_time" in result:
+                        wait_time = result.get("estimated_time", 20)
+                        print(f"Model is loading asynchronously. Waiting {wait_time}s... (Attempt {attempt+1}/{max_retries})")
+                        time.sleep(min(wait_time, 20))
+                        continue
+                    else:
+                        raise Exception(f"HF API returned 200 but contains error: {result['error']}")
+
+            elif response.status_code == 503:
+                # 503 Service Unavailable often used when loading
+                try:
+                    error_data = response.json()
+                    if "loading" in error_data.get("error", "").lower() or "estimated_time" in error_data:
+                        wait_time = error_data.get("estimated_time", 20)
+                        print(f"Model is loading (503). Waiting {wait_time}s... (Attempt {attempt+1}/{max_retries})")
+                        time.sleep(min(wait_time, 20))
+                        continue
+                except ValueError:
+                    pass
+                raise Exception(f"HF API Error 503: Service Unavailable. Response: {response.text}")
+                
+            else:
+                # E.g. 404, 401, 500
+                print(f"HF API standard error {response.status_code}: {response.text}")
+                # We do not retry 400s
+                break
+                
+        except requests.exceptions.ReadTimeout:
+            print(f"HF API timeout on attempt {attempt+1}/{max_retries}. Model might be loading.")
+            if attempt < max_retries - 1:
+                time.sleep(5)
+            else:
+                raise Exception("HF API request timed out repeatedly.")
+        except Exception as e:
+            print(f"Unexpected HF API error: {str(e)}")
+            break # Break on standard exceptions
+            
+    raise Exception(f"Failed to get valid response from HF API after {max_retries} attempts.")
 
 def get_hf_embeddings(text):
     """Returns zero embeddings - we use only linguistic features with hybrid model"""
@@ -205,5 +267,5 @@ def predict():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
+    port = int(os.environ.get('PORT', 5001))
     app.run(host='0.0.0.0', port=port, debug=False)
