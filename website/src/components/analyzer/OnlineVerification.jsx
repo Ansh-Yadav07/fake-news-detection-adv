@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import AnalysisCard from './AnalysisCard';
-import { Globe, ShieldCheck, ShieldAlert, ShieldQuestion, ExternalLink, ChevronDown, ChevronUp, Award } from 'lucide-react';
+import { Globe, ShieldCheck, ShieldAlert, ShieldQuestion, ExternalLink, ChevronDown, ChevronUp, Award, BookOpen, Newspaper } from 'lucide-react';
 
 const statusConfig = {
   'VERIFIED': {
@@ -8,25 +8,38 @@ const statusConfig = {
     bg: 'bg-emerald-50',
     border: 'border-emerald-200',
     badgeBg: 'bg-emerald-600',
-    ringColor: 'ring-emerald-400',
     icon: ShieldCheck,
     glowColor: 'rgba(16, 185, 129, 0.15)',
+  },
+  'VERIFIED FACT': {
+    color: 'text-emerald-700',
+    bg: 'bg-emerald-50',
+    border: 'border-emerald-200',
+    badgeBg: 'bg-emerald-700',
+    icon: BookOpen,
+    glowColor: 'rgba(16, 185, 129, 0.2)',
   },
   'LIKELY SUPPORTED': {
     color: 'text-sky-700',
     bg: 'bg-sky-50',
     border: 'border-sky-200',
     badgeBg: 'bg-sky-600',
-    ringColor: 'ring-sky-400',
     icon: ShieldCheck,
     glowColor: 'rgba(14, 165, 233, 0.15)',
+  },
+  'PARTIALLY VERIFIED': {
+    color: 'text-amber-700',
+    bg: 'bg-amber-50',
+    border: 'border-amber-200',
+    badgeBg: 'bg-amber-600',
+    icon: ShieldQuestion,
+    glowColor: 'rgba(245, 158, 11, 0.15)',
   },
   'PARTIALLY SUPPORTED': {
     color: 'text-amber-700',
     bg: 'bg-amber-50',
     border: 'border-amber-200',
     badgeBg: 'bg-amber-600',
-    ringColor: 'ring-amber-400',
     icon: ShieldQuestion,
     glowColor: 'rgba(245, 158, 11, 0.15)',
   },
@@ -35,16 +48,38 @@ const statusConfig = {
     bg: 'bg-zinc-50',
     border: 'border-zinc-200',
     badgeBg: 'bg-zinc-500',
-    ringColor: 'ring-zinc-400',
     icon: ShieldQuestion,
     glowColor: 'rgba(113, 113, 122, 0.15)',
+  },
+  'NOT FOUND': {
+    color: 'text-zinc-500',
+    bg: 'bg-zinc-50',
+    border: 'border-zinc-200',
+    badgeBg: 'bg-zinc-400',
+    icon: ShieldQuestion,
+    glowColor: 'rgba(113, 113, 122, 0.1)',
+  },
+  'NOT VERIFIED': {
+    color: 'text-orange-700',
+    bg: 'bg-orange-50',
+    border: 'border-orange-200',
+    badgeBg: 'bg-orange-600',
+    icon: ShieldAlert,
+    glowColor: 'rgba(249, 115, 22, 0.15)',
+  },
+  'WEAK MATCH': {
+    color: 'text-amber-600',
+    bg: 'bg-amber-50',
+    border: 'border-amber-200',
+    badgeBg: 'bg-amber-500',
+    icon: ShieldQuestion,
+    glowColor: 'rgba(245, 158, 11, 0.15)',
   },
   'SUSPICIOUS': {
     color: 'text-red-700',
     bg: 'bg-red-50',
     border: 'border-red-200',
     badgeBg: 'bg-red-600',
-    ringColor: 'ring-red-400',
     icon: ShieldAlert,
     glowColor: 'rgba(239, 68, 68, 0.15)',
   },
@@ -82,44 +117,93 @@ const CircularProgress = ({ value, size = 80, strokeWidth = 6, color }) => {
   );
 };
 
-const OnlineVerification = ({ verification }) => {
+const sourceLabel = (source) => {
+  if (source === 'wikipedia') return { text: 'Wikipedia', Icon: BookOpen, cls: 'text-violet-700 bg-violet-50 border-violet-200' };
+  if (source === 'gnews') return { text: 'GNews', Icon: Newspaper, cls: 'text-sky-700 bg-sky-50 border-sky-200' };
+  if (source === 'both') return { text: 'Wikipedia + GNews', Icon: Globe, cls: 'text-emerald-700 bg-emerald-50 border-emerald-200' };
+  return { text: 'Online', Icon: Globe, cls: 'text-zinc-600 bg-zinc-50 border-zinc-200' };
+};
+
+const OnlineVerification = ({ wikipedia, verification, verificationSource, inputType }) => {
   const [showArticles, setShowArticles] = useState(false);
 
-  if (!verification) return null;
+  // If neither source has data, show empty state
+  if (!wikipedia && !verification) return null;
 
-  const {
-    verification_score = 0,
-    supporting_articles = 0,
-    trusted_source_count = 0,
-    status = 'UNVERIFIED',
-    articles = [],
-  } = verification;
+  // Determine which data to show based on source
+  const hasWiki = wikipedia && wikipedia.status && wikipedia.status !== 'NOT FOUND';
+  const hasGNews = verification && verification.supporting_articles > 0;
 
-  const config = statusConfig[status] || statusConfig['UNVERIFIED'];
+  // Calculate combined verification score
+  let primaryScore = 0;
+  let primaryStatus = 'UNVERIFIED';
+  let articles = [];
+  let supportingCount = 0;
+  let trustedCount = 0;
+
+  if (hasWiki && !hasGNews) {
+    primaryScore = wikipedia.verification_score || 0;
+    primaryStatus = wikipedia.status || 'UNVERIFIED';
+  } else if (hasGNews && !hasWiki) {
+    primaryScore = verification.verification_score || 0;
+    primaryStatus = verification.status || 'UNVERIFIED';
+    articles = verification.articles || [];
+    supportingCount = verification.supporting_articles || 0;
+    trustedCount = verification.trusted_source_count || 0;
+  } else if (hasWiki && hasGNews) {
+    // Both available — show combined score
+    const wScore = wikipedia.verification_score || 0;
+    const gScore = verification.verification_score || 0;
+    primaryScore = Math.round((wScore + gScore) / 2);
+    primaryStatus = primaryScore > 70 ? 'VERIFIED' : primaryScore > 40 ? 'PARTIALLY VERIFIED' : 'UNVERIFIED';
+    articles = verification.articles || [];
+    supportingCount = verification.supporting_articles || 0;
+    trustedCount = verification.trusted_source_count || 0;
+  } else {
+    // Neither has good data — show what we have
+    if (wikipedia) {
+      primaryScore = wikipedia.verification_score || 0;
+      primaryStatus = wikipedia.status || 'NOT FOUND';
+    }
+    if (verification) {
+      primaryScore = Math.max(primaryScore, verification.verification_score || 0);
+      primaryStatus = verification.status || primaryStatus;
+      articles = verification.articles || [];
+    }
+  }
+
+  const config = statusConfig[primaryStatus] || statusConfig['UNVERIFIED'];
   const StatusIcon = config.icon;
+  const srcInfo = sourceLabel(verificationSource);
 
-  const progressColor = status === 'VERIFIED' ? '#10b981'
-    : status === 'LIKELY SUPPORTED' ? '#0ea5e9'
-    : status === 'SUSPICIOUS' ? '#ef4444'
-    : status === 'PARTIALLY SUPPORTED' ? '#f59e0b'
+  const progressColor = primaryStatus === 'VERIFIED' || primaryStatus === 'VERIFIED FACT' ? '#10b981'
+    : primaryStatus === 'LIKELY SUPPORTED' ? '#0ea5e9'
+    : primaryStatus === 'SUSPICIOUS' || primaryStatus === 'NOT VERIFIED' ? '#ef4444'
+    : primaryStatus === 'PARTIALLY SUPPORTED' || primaryStatus === 'PARTIALLY VERIFIED' || primaryStatus === 'WEAK MATCH' ? '#f59e0b'
     : '#71717a';
 
   return (
     <AnalysisCard title="Online Verification" icon={Globe}>
       <div className="flex flex-col h-full">
+        {/* Source Badge */}
+        <div className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-lg border text-[10px] font-bold uppercase tracking-wide mb-3 self-start ${srcInfo.cls}`}>
+          <srcInfo.Icon className="w-3 h-3" />
+          {srcInfo.text}
+        </div>
+
         {/* Score Circle + Status */}
         <div className="flex items-center gap-5 mb-5">
           <div className="relative flex-shrink-0">
-            <CircularProgress value={verification_score} color={progressColor} />
+            <CircularProgress value={primaryScore} color={progressColor} />
             <div className="absolute inset-0 flex items-center justify-center">
-              <span className="text-lg font-black text-zinc-900">{Math.round(verification_score)}%</span>
+              <span className="text-lg font-black text-zinc-900">{Math.round(primaryScore)}%</span>
             </div>
           </div>
 
           <div className="flex-1 min-w-0">
             <div className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold tracking-wide uppercase ${config.bg} ${config.color} ${config.border} border mb-2`}>
               <StatusIcon className="w-3.5 h-3.5" />
-              {status}
+              {primaryStatus}
             </div>
             <p className="text-xs text-zinc-500 font-medium leading-snug">
               Verification Score
@@ -129,20 +213,59 @@ const OnlineVerification = ({ verification }) => {
 
         {/* Stats Row */}
         <div className="grid grid-cols-2 gap-3 mb-4">
-          <div className="bg-zinc-50 border border-zinc-100 rounded-xl p-3 text-center">
-            <div className="text-xl font-bold text-zinc-900">{supporting_articles}</div>
-            <div className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider mt-0.5">Supporting</div>
-          </div>
-          <div className="bg-zinc-50 border border-zinc-100 rounded-xl p-3 text-center">
-            <div className="text-xl font-bold text-zinc-900 flex items-center justify-center gap-1">
-              {trusted_source_count}
-              {trusted_source_count >= 3 && <Award className="w-4 h-4 text-emerald-500" />}
+          {/* Wikipedia stats */}
+          {hasWiki && (
+            <div className="bg-violet-50 border border-violet-100 rounded-xl p-3 text-center">
+              <div className="text-xl font-bold text-violet-900">{wikipedia.verification_score || 0}%</div>
+              <div className="text-[10px] font-semibold text-violet-500 uppercase tracking-wider mt-0.5">Wikipedia</div>
             </div>
-            <div className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider mt-0.5">Trusted</div>
-          </div>
+          )}
+          {/* GNews supporting count */}
+          {hasGNews && (
+            <div className="bg-sky-50 border border-sky-100 rounded-xl p-3 text-center">
+              <div className="text-xl font-bold text-sky-900">{supportingCount}</div>
+              <div className="text-[10px] font-semibold text-sky-500 uppercase tracking-wider mt-0.5">Supporting</div>
+            </div>
+          )}
+          {/* Trusted sources */}
+          {hasGNews && (
+            <div className="bg-zinc-50 border border-zinc-100 rounded-xl p-3 text-center">
+              <div className="text-xl font-bold text-zinc-900 flex items-center justify-center gap-1">
+                {trustedCount}
+                {trustedCount >= 3 && <Award className="w-4 h-4 text-emerald-500" />}
+              </div>
+              <div className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider mt-0.5">Trusted</div>
+            </div>
+          )}
+          {/* If only wiki but no gnews, fill with wiki info */}
+          {hasWiki && !hasGNews && (
+            <div className="bg-zinc-50 border border-zinc-100 rounded-xl p-3 text-center">
+              <div className="text-xl font-bold text-zinc-900">1</div>
+              <div className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider mt-0.5">Sources</div>
+            </div>
+          )}
         </div>
 
-        {/* Expandable Articles List */}
+        {/* Wikipedia Extract */}
+        {hasWiki && wikipedia.wiki_extract && (
+          <div className="mb-3 p-2.5 rounded-lg bg-violet-50/50 border border-violet-100">
+            <p className="text-[11px] text-violet-800 leading-relaxed line-clamp-3">
+              <span className="font-bold">Wikipedia:</span> {wikipedia.wiki_extract.substring(0, 150)}...
+            </p>
+            {wikipedia.wiki_url && (
+              <a
+                href={wikipedia.wiki_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 mt-1.5 text-[10px] font-semibold text-violet-600 hover:text-violet-800 transition-colors"
+              >
+                Read full article <ExternalLink className="w-2.5 h-2.5" />
+              </a>
+            )}
+          </div>
+        )}
+
+        {/* Expandable GNews Articles List */}
         {articles.length > 0 && (
           <div className="mt-auto">
             <button

@@ -5,6 +5,8 @@ import re
 import joblib
 import requests
 import time
+import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity as sklearn_cosine_similarity
 from flask import Flask, request, jsonify
@@ -54,6 +56,17 @@ TRUSTED_SOURCES = [
     "associated press", "bbc news"
 ]
 
+# ---- News/Event Keywords for Input Classification ----
+EVENT_KEYWORDS = [
+    "election", "government", "minister", "president", "prime minister",
+    "launched", "announced", "yesterday", "today", "recently",
+    "breaking", "reported", "according to", "sources say",
+    "company", "organization", "incident", "attack", "killed",
+    "arrested", "protest", "rally", "vote", "parliament",
+    "congress", "bjp", "nasa", "isro", "satellite", "war",
+    "pandemic", "covid", "earthquake", "flood", "storm"
+]
+
 # ---- Load Models ----
 print("Loading local models...")
 hybrid_clf = None
@@ -88,7 +101,48 @@ if not tfidf:
     print("WARNING: TFIDF vectorizer not available")
 
 
-# ---- Feature Extraction ----
+# ======================================================================
+# INPUT CLASSIFICATION
+# ======================================================================
+
+def classify_input(text):
+    """
+    Classify user input to determine verification routing.
+    Returns: 'fact_claim', 'news_article', or 'mixed'
+    
+    - fact_claim: Short factual statements (< 25 words, no event keywords)
+    - news_article: Longer text with event/news keywords
+    - mixed: Uncertain — run both Wikipedia and GNews
+    """
+    words = text.split()
+    word_count = len(words)
+    text_lower = text.lower()
+
+    # Check for event/news keywords
+    event_keyword_count = sum(1 for kw in EVENT_KEYWORDS if kw in text_lower)
+
+    # Short text with no event keywords → likely a factual claim
+    if word_count < 25 and event_keyword_count == 0:
+        return "fact_claim"
+
+    # Short text with event keywords → mixed (could be headline)
+    if word_count < 25 and event_keyword_count >= 1:
+        return "mixed"
+
+    # Longer text with event keywords → news article
+    if word_count >= 25 and event_keyword_count >= 1:
+        return "news_article"
+
+    # Longer text without event keywords → mixed
+    if word_count >= 25:
+        return "mixed"
+
+    return "mixed"
+
+
+# ======================================================================
+# FEATURE EXTRACTION
+# ======================================================================
 
 def compute_clickbait_score(text, uppercase_ratio, punct_ratio):
     """
@@ -164,7 +218,9 @@ def extract_features(text):
     ], uppercase_ratio, punctuation_ratio
 
 
-# ---- HuggingFace Inference API (Fallback) ----
+# ======================================================================
+# HUGGINGFACE INFERENCE API (FALLBACK)
+# ======================================================================
 
 def get_hf_classification(text, max_retries=3):
     """
@@ -236,154 +292,224 @@ def get_hf_classification(text, max_retries=3):
     raise Exception(f"Failed to get HF API response after {max_retries} attempts")
 
 
-# ---- Prediction Endpoint ----
+# ======================================================================
+# WIKIPEDIA VERIFICATION
+# ======================================================================
 
-@app.route('/', methods=['GET'])
-def health():
-    return jsonify({
-        "status": "API is running",
-        "models": {
-            "lr_tfidf": hybrid_clf is not None,
-            "transformer_local": local_transformer is not None,
-            "transformer_remote": bool(HF_TOKEN)
-        }
-    }), 200
+def extract_entity_for_wiki(text):
+    """
+    Extract the most relevant entity/topic from text for Wikipedia lookup.
+    Focuses on proper nouns, capitalized words, and key subjects.
+    Returns a search query string.
+    """
+    # Remove common noise words and punctuation
+    clean = re.sub(r'[^\w\s]', '', text)
+    words = clean.split()
+
+    # Strategy 1: Find capitalized words (likely proper nouns/entities)
+    capitalized = [w for w in words if w[0].isupper() and w.lower() not in stop_words and len(w) > 1]
+
+    if capitalized:
+        # Use up to 3 capitalized words as the query
+        return ' '.join(capitalized[:3])
+
+    # Strategy 2: Remove stopwords and use remaining content words
+    content_words = [w for w in words if w.lower() not in stop_words and len(w) > 2]
+    if content_words:
+        return ' '.join(content_words[:3])
+
+    # Strategy 3: Fallback — first 5 words
+    return ' '.join(words[:5])
 
 
-@app.route('/predict', methods=['POST'])
-def predict():
-    data = request.get_json()
-    if not data or 'text' not in data:
-        return jsonify({"error": "No text provided"}), 400
+def search_wikipedia(query, timeout=1.5):
+    """
+    Search Wikipedia REST API for a summary of the given query.
+    Uses the page summary endpoint.
+    Timeout: 1.5 seconds (hard limit per spec).
+    
+    Returns dict with title, extract, description, url or None on failure.
+    """
+    if not query or not query.strip():
+        return None
 
-    text = data['text']
-    if len(text.strip()) == 0:
-        return jsonify({"error": "Empty text provided"}), 400
+    # URL-encode the query for the REST API
+    encoded_query = urllib.parse.quote(query.strip().replace(' ', '_'))
+    url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{encoded_query}"
 
     try:
-        # ========================================
-        # 1. TRANSFORMER MODEL PREDICTION
-        # ========================================
-        t_label = None
-        t_conf = None
-        transformer_source = "none"
+        response = requests.get(
+            url,
+            headers={"User-Agent": "FakeNewsDetector/1.0"},
+            timeout=timeout
+        )
 
-        # Try local transformer first
-        try:
-            if local_transformer:
-                hf_result = local_transformer(text[:512])
-                best_pred = max(hf_result, key=lambda x: x['score'])
-                t_label_raw = best_pred['label']
-                t_conf = best_pred['score']
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("type") == "disambiguation":
+                # Try the first word only for disambiguation pages
+                first_word = query.strip().split()[0]
+                if first_word != query.strip():
+                    return search_wikipedia(first_word, timeout=timeout)
+                return None
 
-                # Map labels — handles both LABEL_0/LABEL_1 and FAKE/REAL
-                if t_label_raw in ["LABEL_1", "1", "REAL"]:
-                    t_label = "REAL"
-                elif t_label_raw in ["LABEL_0", "0", "FAKE"]:
-                    t_label = "FAKE"
-                else:
-                    t_label = "FAKE"  # Default unknown labels to FAKE for safety
-
-                transformer_source = "local"
-                print(f"Transformer (local): {t_label} ({t_conf:.4f})")
-        except Exception as e:
-            print(f"Local transformer error: {str(e)}")
-
-        # Fallback to HuggingFace API if local failed
-        if t_label is None:
-            try:
-                raw_label, raw_conf = get_hf_classification(text)
-                t_conf = raw_conf
-
-                # Map HF API labels
-                if raw_label in ["LABEL_1", "1", "REAL"]:
-                    t_label = "REAL"
-                elif raw_label in ["LABEL_0", "0", "FAKE"]:
-                    t_label = "FAKE"
-                else:
-                    t_label = "FAKE"
-
-                transformer_source = "remote"
-                print(f"Transformer (HF API): {t_label} ({t_conf:.4f})")
-            except Exception as e:
-                print(f"HF API fallback also failed: {str(e)}")
-
-        # ========================================
-        # 2. LR + TF-IDF MODEL PREDICTION
-        # ========================================
-        h_label = None
-        h_conf = None
-
-        if hybrid_clf and tfidf:
-            vectorized = tfidf.transform([text])
-            h_probs = hybrid_clf.predict_proba(vectorized)[0]
-            h_pred_class = np.argmax(h_probs)
-            h_conf = float(h_probs[h_pred_class])
-            h_label = hybrid_clf.classes_[h_pred_class]
-            print(f"LR Model: {h_label} ({h_conf:.4f})")
-
-        # ========================================
-        # 3. EXTRACT LINGUISTIC FEATURES
-        # ========================================
-        ling_feats, uppercase_ratio, punct_ratio = extract_features(text)
-        clickbait_score = compute_clickbait_score(text, uppercase_ratio, punct_ratio)
-        word_count = len(text.split())
-        avg_word_length = np.mean([len(w) for w in text.split()]) if word_count > 0 else 0
-
-        # ========================================
-        # 4. HANDLE MISSING MODELS
-        # ========================================
-        # If transformer failed completely, use LR result
-        if t_label is None:
-            if h_label is not None:
-                t_label = h_label
-                t_conf = h_conf
-                transformer_source = "fallback_lr"
-            else:
-                t_label = "UNKNOWN"
-                t_conf = 0.5
-
-        # If LR failed, use transformer result
-        if h_label is None:
-            if t_label is not None:
-                h_label = t_label
-                h_conf = t_conf
-            else:
-                h_label = "UNKNOWN"
-                h_conf = 0.5
-
-        # ========================================
-        # 5. BUILD RESPONSE
-        # ========================================
-        payload = {
-            "transformer": {
-                "label": t_label,
-                "confidence": round(float(t_conf), 4),
-                "source": transformer_source
-            },
-            "hybrid": {
-                "label": h_label,
-                "confidence": round(float(h_conf), 4)
-            },
-            "raw_features": {
-                "uppercase": round(float(uppercase_ratio), 4),
-                "punctuation": round(float(punct_ratio), 4),
-                "clickbait": round(float(clickbait_score), 4),
-                "complexity": round(float(avg_word_length), 2),
-                "word_count": word_count
+            return {
+                "title": data.get("title", ""),
+                "extract": data.get("extract", ""),
+                "description": data.get("description", ""),
+                "url": data.get("content_urls", {}).get("desktop", {}).get("page", ""),
+                "found": True
             }
+        elif response.status_code == 404:
+            # Try Wikipedia search API as fallback
+            return _wikipedia_search_fallback(query, timeout)
+        else:
+            return None
+
+    except requests.exceptions.Timeout:
+        print(f"Wikipedia API timed out for query: '{query}'")
+        return None
+    except Exception as e:
+        print(f"Wikipedia API error: {e}")
+        return None
+
+
+def _wikipedia_search_fallback(query, timeout=1.5):
+    """
+    Fallback: use Wikipedia search API to find the best matching article.
+    """
+    search_url = "https://en.wikipedia.org/w/api.php"
+    params = {
+        "action": "query",
+        "list": "search",
+        "srsearch": query,
+        "srlimit": 1,
+        "format": "json"
+    }
+
+    try:
+        resp = requests.get(search_url, params=params, timeout=timeout,
+                            headers={"User-Agent": "FakeNewsDetector/1.0"})
+        if resp.status_code == 200:
+            data = resp.json()
+            results = data.get("query", {}).get("search", [])
+            if results:
+                title = results[0].get("title", "")
+                # Now fetch the summary for this title
+                return search_wikipedia(title, timeout=timeout)
+        return None
+    except Exception:
+        return None
+
+
+def verify_against_wikipedia(user_text, wiki_data):
+    """
+    Compare user's claim against Wikipedia data using TF-IDF cosine similarity.
+    Also checks if key terms from the claim appear in the Wikipedia extract.
+    
+    Returns verification result dict.
+    """
+    if not wiki_data or not wiki_data.get("found"):
+        return {
+            "verification_score": 0,
+            "status": "NOT FOUND",
+            "message": "No Wikipedia article found for this claim.",
+            "insights": ["Could not find a relevant Wikipedia article for verification."],
+            "wiki_title": "",
+            "wiki_url": "",
+            "wiki_extract": ""
         }
 
-        return jsonify(payload)
+    extract = wiki_data.get("extract", "")
+    description = wiki_data.get("description", "")
+    wiki_text = f"{description} {extract}"
 
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        print("Prediction Error:", str(e))
-        return jsonify({"error": str(e)}), 500
+    if not wiki_text.strip():
+        return {
+            "verification_score": 0,
+            "status": "NOT FOUND",
+            "message": "Wikipedia article has no content.",
+            "insights": ["Wikipedia article found but contains no useful extract."],
+            "wiki_title": wiki_data.get("title", ""),
+            "wiki_url": wiki_data.get("url", ""),
+            "wiki_extract": ""
+        }
+
+    # Method 1: TF-IDF cosine similarity
+    try:
+        vectorizer = TfidfVectorizer(
+            stop_words='english',
+            max_features=5000,
+            ngram_range=(1, 2)
+        )
+        tfidf_matrix = vectorizer.fit_transform([user_text, wiki_text])
+        similarity = sklearn_cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0]
+        tfidf_score = round(float(similarity) * 100, 1)
+    except Exception:
+        tfidf_score = 0
+
+    # Method 2: Key term overlap — check if important words from claim appear in Wikipedia
+    user_words = set(w.lower() for w in re.sub(r'[^\w\s]', '', user_text).split()
+                     if w.lower() not in stop_words and len(w) > 2)
+    wiki_words = set(w.lower() for w in re.sub(r'[^\w\s]', '', wiki_text).split()
+                     if w.lower() not in stop_words and len(w) > 2)
+
+    if user_words:
+        overlap = len(user_words & wiki_words)
+        overlap_ratio = overlap / len(user_words)
+        term_score = round(overlap_ratio * 100, 1)
+    else:
+        term_score = 0
+
+    # Combined score: weighted average (TF-IDF 60%, term overlap 40%)
+    verification_score = round(tfidf_score * 0.6 + term_score * 0.4, 1)
+
+    # Determine status
+    if verification_score > 70:
+        status = "VERIFIED FACT"
+        message = f"Wikipedia confirms this claim. Article: \"{wiki_data['title']}\"."
+    elif verification_score > 45:
+        status = "PARTIALLY VERIFIED"
+        message = f"Wikipedia contains related information but not a full match. Article: \"{wiki_data['title']}\"."
+    elif verification_score > 20:
+        status = "WEAK MATCH"
+        message = f"Wikipedia has some related content but the claim could not be strongly verified."
+    else:
+        status = "NOT VERIFIED"
+        message = f"The claim does not match Wikipedia content for \"{wiki_data['title']}\"."
+
+    # Generate insights
+    insights = []
+    if status == "VERIFIED FACT":
+        insights.append(f"Wikipedia confirms the statement.")
+        insights.append(f"Fact matches trusted knowledge sources.")
+    elif status == "PARTIALLY VERIFIED":
+        insights.append(f"Wikipedia contains related information in the article \"{wiki_data['title']}\".")
+    else:
+        insights.append(f"Wikipedia article \"{wiki_data['title']}\" found but claim could not be fully verified.")
+
+    insights.append(f"Wikipedia verification score: {verification_score}%.")
+
+    # Add description if it directly relates
+    if description:
+        insights.append(f"Wikipedia describes \"{wiki_data['title']}\" as: {description}.")
+
+    return {
+        "verification_score": verification_score,
+        "status": status,
+        "message": message,
+        "insights": insights,
+        "wiki_title": wiki_data.get("title", ""),
+        "wiki_url": wiki_data.get("url", ""),
+        "wiki_extract": extract[:300] if extract else "",
+        "tfidf_score": tfidf_score,
+        "term_overlap_score": term_score
+    }
 
 
-# ---- News Verification Functions ----
+# ======================================================================
+# GNEWS VERIFICATION (updated with faster timeout)
+# ======================================================================
 
 def extract_main_claim(text):
     """
@@ -407,10 +533,11 @@ def extract_main_claim(text):
     return ' '.join(words[:25])
 
 
-def search_gnews(query, max_results=10):
+def search_gnews(query, max_results=10, timeout=2.0):
     """
     Search GNews API for articles matching the query.
     Returns a list of article dicts with title, description, source, url, publishedAt.
+    Timeout: 2 seconds (hard limit per spec).
     """
     if not GNEWS_API_KEY:
         raise Exception("GNEWS_API_KEY is not configured")
@@ -428,11 +555,11 @@ def search_gnews(query, max_results=10):
     }
 
     try:
-        response = requests.get(url, params=params, timeout=15)
+        response = requests.get(url, params=params, timeout=timeout)
         if response.status_code == 200:
             data = response.json()
             articles = data.get("articles", [])
-            return [{
+            return [{ 
                 "title": a.get("title", ""),
                 "description": a.get("description", ""),
                 "source": a.get("source", {}).get("name", "Unknown"),
@@ -446,7 +573,7 @@ def search_gnews(query, max_results=10):
         else:
             raise Exception(f"GNews API error {response.status_code}: {response.text[:200]}")
     except requests.exceptions.Timeout:
-        raise Exception("GNews API request timed out")
+        raise Exception("GNews API request timed out (2s limit)")
     except requests.exceptions.ConnectionError:
         raise Exception("Could not connect to GNews API")
 
@@ -550,7 +677,7 @@ def analyze_verification_results(user_text, articles, similarity_scores):
 
     # Add top trusted source matches
     for article, score in sorted(trusted_supporting, key=lambda x: x[1], reverse=True)[:4]:
-        insights.append(f"{article['source']} reports a highly similar story ({score}%).")
+        insights.append(f"{article['source']} supports the claim ({score}%).")
 
     if trusted_count > 0:
         insights.append(f"{trusted_count} trusted source{'s' if trusted_count != 1 else ''} independently support{'s' if trusted_count == 1 else ''} the claim.")
@@ -572,33 +699,131 @@ def analyze_verification_results(user_text, articles, similarity_scores):
     }
 
 
-@app.route('/verify', methods=['POST'])
-def verify():
-    """Verify submitted text against online news sources using GNews API."""
-    data = request.get_json()
-    if not data or 'text' not in data:
-        return jsonify({"error": "No text provided"}), 400
+# ======================================================================
+# PARALLEL TASK RUNNERS (wrapped for safe execution)
+# ======================================================================
 
-    text = data['text']
-    if len(text.strip()) == 0:
-        return jsonify({"error": "Empty text provided"}), 400
-
+def _run_transformer(text):
+    """Run transformer model prediction. Returns dict or None."""
     try:
-        # Step 1: Extract main claim
+        t_label = None
+        t_conf = None
+        source = "none"
+
+        # Try local transformer first
+        if local_transformer:
+            hf_result = local_transformer(text[:512])
+            best_pred = max(hf_result, key=lambda x: x['score'])
+            t_label_raw = best_pred['label']
+            t_conf = best_pred['score']
+
+            if t_label_raw in ["LABEL_1", "1", "REAL"]:
+                t_label = "REAL"
+            elif t_label_raw in ["LABEL_0", "0", "FAKE"]:
+                t_label = "FAKE"
+            else:
+                t_label = "FAKE"
+
+            source = "local"
+
+        # Fallback to HuggingFace API
+        if t_label is None:
+            raw_label, raw_conf = get_hf_classification(text)
+            t_conf = raw_conf
+            if raw_label in ["LABEL_1", "1", "REAL"]:
+                t_label = "REAL"
+            elif raw_label in ["LABEL_0", "0", "FAKE"]:
+                t_label = "FAKE"
+            else:
+                t_label = "FAKE"
+            source = "remote"
+
+        return {"label": t_label, "confidence": round(float(t_conf), 4), "source": source}
+    except Exception as e:
+        print(f"Transformer task error: {e}")
+        return None
+
+
+def _run_hybrid_ml(text):
+    """Run LR + TF-IDF model prediction. Returns dict or None."""
+    try:
+        if hybrid_clf and tfidf:
+            vectorized = tfidf.transform([text])
+            h_probs = hybrid_clf.predict_proba(vectorized)[0]
+            h_pred_class = np.argmax(h_probs)
+            h_conf = float(h_probs[h_pred_class])
+            h_label = hybrid_clf.classes_[h_pred_class]
+            return {"label": h_label, "confidence": round(h_conf, 4)}
+        return None
+    except Exception as e:
+        print(f"Hybrid ML task error: {e}")
+        return None
+
+
+def _run_linguistic(text):
+    """Run linguistic feature extraction. Returns dict or None."""
+    try:
+        ling_feats, uppercase_ratio, punct_ratio = extract_features(text)
+        clickbait_score = compute_clickbait_score(text, uppercase_ratio, punct_ratio)
+        word_count = len(text.split())
+        avg_word_length = np.mean([len(w) for w in text.split()]) if word_count > 0 else 0
+
+        return {
+            "uppercase": round(float(uppercase_ratio), 4),
+            "punctuation": round(float(punct_ratio), 4),
+            "clickbait": round(float(clickbait_score), 4),
+            "complexity": round(float(avg_word_length), 2),
+            "word_count": word_count
+        }
+    except Exception as e:
+        print(f"Linguistic task error: {e}")
+        return None
+
+
+def _run_wikipedia_verification(text, input_type):
+    """Run Wikipedia verification. Returns dict or None."""
+    try:
+        # Skip Wikipedia for pure news articles (GNews is primary)
+        if input_type == "news_article":
+            return None
+
+        entity = extract_entity_for_wiki(text)
+        print(f"[Wikipedia] Searching for entity: '{entity}'")
+
+        wiki_data = search_wikipedia(entity, timeout=1.5)
+        if not wiki_data:
+            return {
+                "verification_score": 0,
+                "status": "NOT FOUND",
+                "message": "No Wikipedia article found.",
+                "insights": ["No relevant Wikipedia article found for verification."],
+                "wiki_title": "",
+                "wiki_url": "",
+                "wiki_extract": ""
+            }
+
+        result = verify_against_wikipedia(text, wiki_data)
+        return result
+    except Exception as e:
+        print(f"Wikipedia task error: {e}")
+        return None
+
+
+def _run_gnews_verification(text, input_type):
+    """Run GNews verification. Returns dict or None."""
+    try:
+        # Skip GNews for pure fact claims (Wikipedia is primary)
+        if input_type == "fact_claim":
+            return None
+
         claim = extract_main_claim(text)
-        print(f"Verification: Searching for claim: '{claim[:80]}...'")
+        print(f"[GNews] Searching for claim: '{claim[:80]}'")
 
-        # Step 2: Search GNews
-        articles = search_gnews(claim)
-        print(f"Verification: Found {len(articles)} articles")
-
-        # Step 3: Compute similarity
+        articles = search_gnews(claim, timeout=2.0)
         similarity_scores = compute_article_similarity(text, articles)
-
-        # Step 4: Analyze results
         analysis = analyze_verification_results(text, articles, similarity_scores)
 
-        # Build enriched article list with similarity scores
+        # Build enriched article list
         enriched_articles = []
         for i, article in enumerate(articles):
             score = similarity_scores[i] if i < len(similarity_scores) else 0
@@ -611,7 +836,300 @@ def verify():
                 "published_at": article["published_at"]
             })
 
-        # Sort by similarity descending
+        enriched_articles.sort(key=lambda x: x["similarity"], reverse=True)
+
+        return {
+            "verification_score": analysis["verification_score"],
+            "supporting_articles": analysis["supporting_articles"],
+            "trusted_source_count": analysis["trusted_source_count"],
+            "status": analysis["status"],
+            "message": analysis["message"],
+            "articles": enriched_articles,
+            "insights": analysis["insights"],
+            "claim_searched": claim
+        }
+    except Exception as e:
+        print(f"GNews task error: {e}")
+        return None
+
+
+# ======================================================================
+# API ENDPOINTS
+# ======================================================================
+
+@app.route('/', methods=['GET'])
+def health():
+    return jsonify({
+        "status": "API is running",
+        "models": {
+            "lr_tfidf": hybrid_clf is not None,
+            "transformer_local": local_transformer is not None,
+            "transformer_remote": bool(HF_TOKEN)
+        }
+    }), 200
+
+
+@app.route('/analyze', methods=['POST'])
+def analyze():
+    """
+    Unified analysis endpoint — runs ALL tasks in parallel.
+    
+    Tasks:
+      1. Transformer Model
+      2. Hybrid ML Model
+      3. Linguistic Analysis
+      4. Clickbait Analysis (part of linguistic)
+      5. Wikipedia Verification
+      6. GNews Verification
+    
+    All tasks execute concurrently via ThreadPoolExecutor.
+    Returns a unified response with all results.
+    """
+    data = request.get_json()
+    if not data or 'text' not in data:
+        return jsonify({"error": "No text provided"}), 400
+
+    text = data['text']
+    if len(text.strip()) == 0:
+        return jsonify({"error": "Empty text provided"}), 400
+
+    start_time = time.time()
+
+    try:
+        # Step 1: Classify input type
+        input_type = classify_input(text)
+        print(f"\n{'='*60}")
+        print(f"[Analyze] Input type: {input_type} | Length: {len(text.split())} words")
+        print(f"{'='*60}")
+
+        # Step 2: Run ALL tasks in parallel
+        timings = {}
+        results = {}
+
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            task_starts = {}
+            futures = {}
+
+            # Submit all tasks
+            task_starts['transformer'] = time.time()
+            futures['transformer'] = executor.submit(_run_transformer, text)
+
+            task_starts['hybrid'] = time.time()
+            futures['hybrid'] = executor.submit(_run_hybrid_ml, text)
+
+            task_starts['linguistic'] = time.time()
+            futures['linguistic'] = executor.submit(_run_linguistic, text)
+
+            task_starts['wikipedia'] = time.time()
+            futures['wikipedia'] = executor.submit(_run_wikipedia_verification, text, input_type)
+
+            task_starts['gnews'] = time.time()
+            futures['gnews'] = executor.submit(_run_gnews_verification, text, input_type)
+
+            # Collect results with timeout
+            for task_name, future in futures.items():
+                try:
+                    results[task_name] = future.result(timeout=5)
+                    timings[task_name] = round(time.time() - task_starts[task_name], 3)
+                except Exception as e:
+                    print(f"[Analyze] Task '{task_name}' failed: {e}")
+                    results[task_name] = None
+                    timings[task_name] = round(time.time() - task_starts[task_name], 3)
+
+        # Step 3: Handle missing model results with fallbacks
+        transformer = results.get('transformer')
+        hybrid = results.get('hybrid')
+        linguistic = results.get('linguistic')
+        wikipedia = results.get('wikipedia')
+        gnews = results.get('gnews')
+
+        # Fallback: if transformer failed, use hybrid result
+        if transformer is None:
+            if hybrid is not None:
+                transformer = {"label": hybrid["label"], "confidence": hybrid["confidence"], "source": "fallback_lr"}
+            else:
+                transformer = {"label": "UNKNOWN", "confidence": 0.5, "source": "none"}
+
+        # Fallback: if hybrid failed, use transformer result
+        if hybrid is None:
+            if transformer is not None:
+                hybrid = {"label": transformer["label"], "confidence": transformer["confidence"]}
+            else:
+                hybrid = {"label": "UNKNOWN", "confidence": 0.5}
+
+        # Fallback: if linguistic failed
+        if linguistic is None:
+            linguistic = {
+                "uppercase": 0, "punctuation": 0,
+                "clickbait": 0, "complexity": 5, "word_count": len(text.split())
+            }
+
+        # Step 4: Build response
+        total_time = round(time.time() - start_time, 3)
+        print(f"[Analyze] Total time: {total_time}s | Timings: {timings}")
+
+        payload = {
+            "input_type": input_type,
+            "transformer": transformer,
+            "hybrid": hybrid,
+            "raw_features": linguistic,
+            "wikipedia": wikipedia,
+            "verification": gnews,
+            "timings": timings,
+            "total_time": total_time
+        }
+
+        return jsonify(payload)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"Analyze Error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+# ---- Legacy Endpoints (backward compatible) ----
+
+@app.route('/predict', methods=['POST'])
+def predict():
+    data = request.get_json()
+    if not data or 'text' not in data:
+        return jsonify({"error": "No text provided"}), 400
+
+    text = data['text']
+    if len(text.strip()) == 0:
+        return jsonify({"error": "Empty text provided"}), 400
+
+    try:
+        # 1. TRANSFORMER MODEL PREDICTION
+        t_label = None
+        t_conf = None
+        transformer_source = "none"
+
+        try:
+            if local_transformer:
+                hf_result = local_transformer(text[:512])
+                best_pred = max(hf_result, key=lambda x: x['score'])
+                t_label_raw = best_pred['label']
+                t_conf = best_pred['score']
+
+                if t_label_raw in ["LABEL_1", "1", "REAL"]:
+                    t_label = "REAL"
+                elif t_label_raw in ["LABEL_0", "0", "FAKE"]:
+                    t_label = "FAKE"
+                else:
+                    t_label = "FAKE"
+
+                transformer_source = "local"
+        except Exception as e:
+            print(f"Local transformer error: {str(e)}")
+
+        if t_label is None:
+            try:
+                raw_label, raw_conf = get_hf_classification(text)
+                t_conf = raw_conf
+                if raw_label in ["LABEL_1", "1", "REAL"]:
+                    t_label = "REAL"
+                elif raw_label in ["LABEL_0", "0", "FAKE"]:
+                    t_label = "FAKE"
+                else:
+                    t_label = "FAKE"
+                transformer_source = "remote"
+            except Exception as e:
+                print(f"HF API fallback also failed: {str(e)}")
+
+        # 2. LR + TF-IDF MODEL PREDICTION
+        h_label = None
+        h_conf = None
+
+        if hybrid_clf and tfidf:
+            vectorized = tfidf.transform([text])
+            h_probs = hybrid_clf.predict_proba(vectorized)[0]
+            h_pred_class = np.argmax(h_probs)
+            h_conf = float(h_probs[h_pred_class])
+            h_label = hybrid_clf.classes_[h_pred_class]
+
+        # 3. EXTRACT LINGUISTIC FEATURES
+        ling_feats, uppercase_ratio, punct_ratio = extract_features(text)
+        clickbait_score = compute_clickbait_score(text, uppercase_ratio, punct_ratio)
+        word_count = len(text.split())
+        avg_word_length = np.mean([len(w) for w in text.split()]) if word_count > 0 else 0
+
+        # 4. HANDLE MISSING MODELS
+        if t_label is None:
+            if h_label is not None:
+                t_label = h_label
+                t_conf = h_conf
+                transformer_source = "fallback_lr"
+            else:
+                t_label = "UNKNOWN"
+                t_conf = 0.5
+
+        if h_label is None:
+            if t_label is not None:
+                h_label = t_label
+                h_conf = t_conf
+            else:
+                h_label = "UNKNOWN"
+                h_conf = 0.5
+
+        # 5. BUILD RESPONSE
+        payload = {
+            "transformer": {
+                "label": t_label,
+                "confidence": round(float(t_conf), 4),
+                "source": transformer_source
+            },
+            "hybrid": {
+                "label": h_label,
+                "confidence": round(float(h_conf), 4)
+            },
+            "raw_features": {
+                "uppercase": round(float(uppercase_ratio), 4),
+                "punctuation": round(float(punct_ratio), 4),
+                "clickbait": round(float(clickbait_score), 4),
+                "complexity": round(float(avg_word_length), 2),
+                "word_count": word_count
+            }
+        }
+
+        return jsonify(payload)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/verify', methods=['POST'])
+def verify():
+    """Legacy verify endpoint — kept for backward compatibility."""
+    data = request.get_json()
+    if not data or 'text' not in data:
+        return jsonify({"error": "No text provided"}), 400
+
+    text = data['text']
+    if len(text.strip()) == 0:
+        return jsonify({"error": "Empty text provided"}), 400
+
+    try:
+        claim = extract_main_claim(text)
+        articles = search_gnews(claim, timeout=2.0)
+        similarity_scores = compute_article_similarity(text, articles)
+        analysis = analyze_verification_results(text, articles, similarity_scores)
+
+        enriched_articles = []
+        for i, article in enumerate(articles):
+            score = similarity_scores[i] if i < len(similarity_scores) else 0
+            enriched_articles.append({
+                "title": article["title"],
+                "source": article["source"],
+                "url": article["url"],
+                "similarity": score,
+                "is_trusted": is_trusted_source(article["source"]),
+                "published_at": article["published_at"]
+            })
+
         enriched_articles.sort(key=lambda x: x["similarity"], reverse=True)
 
         payload = {
@@ -630,7 +1148,6 @@ def verify():
     except Exception as e:
         import traceback
         traceback.print_exc()
-        print(f"Verification Error: {str(e)}")
         return jsonify({
             "error": str(e),
             "verification_score": 0,
@@ -641,7 +1158,7 @@ def verify():
             "articles": [],
             "insights": ["Online verification could not be completed."],
             "claim_searched": ""
-        }), 200  # Return 200 with error info so frontend can still show partial results
+        }), 200
 
 
 if __name__ == '__main__':

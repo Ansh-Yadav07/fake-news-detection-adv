@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ArrowRight, Loader2, Sparkles, Globe, Wifi, WifiOff } from 'lucide-react';
+import { ArrowRight, Loader2, Sparkles, WifiOff, Zap, BookOpen, Newspaper } from 'lucide-react';
 import ChartSection from './analyzer/ChartSection';
 import StatsGrid from './analyzer/StatsGrid';
 import FeatureBars from './analyzer/FeatureBars';
@@ -7,6 +7,12 @@ import VerdictPanel from './analyzer/VerdictPanel';
 import InsightsList from './analyzer/InsightsList';
 import OnlineVerification from './analyzer/OnlineVerification';
 import { getEnhancedDecision, getEnhancedDecisionWithVerification, calculateRobustness, calculateRobustnessWithVerification } from '../utils/decisionLogic';
+
+const INPUT_TYPE_CONFIG = {
+  fact_claim: { label: 'Fact Claim', icon: BookOpen, color: 'text-violet-700 bg-violet-50 border-violet-200' },
+  news_article: { label: 'News Article', icon: Newspaper, color: 'text-sky-700 bg-sky-50 border-sky-200' },
+  mixed: { label: 'Mixed Content', icon: Zap, color: 'text-amber-700 bg-amber-50 border-amber-200' },
+};
 
 const DemoSection = () => {
   const [input, setInput] = useState('');
@@ -19,58 +25,44 @@ const DemoSection = () => {
     
     setLoading(true);
     setResult(null);
-    setLoadingPhase('Initializing analysis...');
+    setLoadingPhase('Initializing parallel analysis...');
 
     try {
       const apiBase = (import.meta.env.VITE_API_URL || 'http://127.0.0.1:5001/predict').replace('/predict', '');
       const textPayload = JSON.stringify({ text: input.trim() });
 
-      // Fire BOTH API calls in parallel for best performance
-      setLoadingPhase('Running ML models & verifying sources...');
+      // Single unified call — all 6 tasks run in parallel on the backend
+      setLoadingPhase('Running 6 parallel tasks...');
       
-      const [predictResult, verifyResult] = await Promise.allSettled([
-        fetch(`${apiBase}/predict`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: textPayload
-        }).then(async (res) => {
-          if (!res.ok) throw new Error(`API error: ${res.status}`);
-          const data = await res.json();
-          if (data.error) throw new Error(data.error);
-          return data;
-        }),
-        fetch(`${apiBase}/verify`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: textPayload
-        }).then(async (res) => {
-          if (!res.ok) throw new Error(`Verify API error: ${res.status}`);
-          return await res.json();
-        })
-      ]);
+      const response = await fetch(`${apiBase}/analyze`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: textPayload
+      });
 
-      // ML prediction is required
-      if (predictResult.status === 'rejected') {
-        throw new Error(predictResult.reason?.message || 'Failed to connect to ML prediction API');
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
       }
 
-      const apiData = predictResult.value;
-
-      // Verification is optional — graceful fallback
-      const verificationData = verifyResult.status === 'fulfilled' ? verifyResult.value : null;
-      const verificationAvailable = verificationData && !verificationData.error;
+      const apiData = await response.json();
+      if (apiData.error) {
+        throw new Error(apiData.error);
+      }
 
       setLoadingPhase('Computing verdict...');
 
       const words = input.trim().split(/\s+/);
       const wordCount = words.length;
 
-      // Extract from the API response
+      // Extract from unified response
       const t_conf = apiData.transformer.confidence;
       const t_label = apiData.transformer.label;
       const h_conf = apiData.hybrid.confidence;
       const h_label = apiData.hybrid.label;
       const rawFeatures = apiData.raw_features || {};
+      const inputType = apiData.input_type || 'mixed';
+      const wikipedia = apiData.wikipedia || null;
+      const verification = apiData.verification || null;
 
       const computedFeatures = {
         clickbait: rawFeatures.clickbait || 0,
@@ -84,20 +76,27 @@ const DemoSection = () => {
       const uppercaseScore = Math.round(computedFeatures.uppercase * 100);
       const pctScore = Math.round(computedFeatures.punctuation * 100);
 
+      // Determine if ANY verification source is available
+      const wikiAvailable = wikipedia && wikipedia.status && wikipedia.status !== "NOT FOUND";
+      const gnewsAvailable = verification && !verification.error;
+      const hasVerification = wikiAvailable || gnewsAvailable;
+
       // Get decision — WITH or WITHOUT verification
       let decision;
       let robustnessScore;
 
-      if (verificationAvailable) {
+      if (hasVerification) {
         decision = getEnhancedDecisionWithVerification(
           t_label, t_conf,
           h_label, h_conf,
           clickbaitScore, pctScore, uppercaseScore,
           wordCount,
-          verificationData
+          inputType,
+          wikipedia,
+          verification
         );
         robustnessScore = calculateRobustnessWithVerification(
-          t_conf, h_conf, decision.agreement / 100, wordCount, verificationData
+          t_conf, h_conf, decision.agreement / 100, wordCount, wikipedia, verification
         );
       } else {
         decision = getEnhancedDecision(
@@ -113,8 +112,6 @@ const DemoSection = () => {
       
       const finalVerdictLabel = decision.final_label;
       const agreementScore = decision.agreement;
-      
-      // Use the rich insights from the decision logic
       const explanations = decision.insights || [decision.reason];
 
       const dashboardData = {
@@ -144,9 +141,14 @@ const DemoSection = () => {
         finalVerdictLabel: finalVerdictLabel,
         verdictExplanation: decision.reason,
         explanations: explanations,
-        verification: verificationAvailable ? verificationData : null,
+        inputType: inputType,
+        wikipedia: wikiAvailable ? wikipedia : null,
+        verification: gnewsAvailable ? verification : null,
+        verificationSource: decision.verification_source || 'none',
         verificationWeights: decision.weights || null,
-        verificationFailed: !verificationAvailable
+        verificationFailed: !hasVerification,
+        timings: apiData.timings || null,
+        totalTime: apiData.total_time || null
       };
       
       setResult(dashboardData);
@@ -159,6 +161,8 @@ const DemoSection = () => {
     }
   };
 
+  const inputTypeConfig = result ? INPUT_TYPE_CONFIG[result.inputType] || INPUT_TYPE_CONFIG.mixed : null;
+
   return (
     <section id="demo" className="py-10 px-6 max-w-6xl mx-auto">
       <div className="text-center mb-12 animate-in fade-in slide-in-from-bottom-4 duration-700">
@@ -170,7 +174,7 @@ const DemoSection = () => {
           Content Analysis Engine
         </h2>
         <p className="text-zinc-500 max-w-xl mx-auto text-sm md:text-base font-medium">
-          Paste your article or headline below. Our dual-model pipeline will process linguistic markers, verify against trusted news sources, and establish a multi-layered truthfulness verdict.
+          Paste your article or headline below. Our parallel verification engine runs 6 concurrent checks — ML models, linguistic analysis, Wikipedia facts, and live news sources — in under 4 seconds.
         </p>
       </div>
 
@@ -179,7 +183,7 @@ const DemoSection = () => {
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Paste text here... (e.g. 'BREAKING: Secret documents exposed!')"
+            placeholder="Paste text here... (e.g. 'Lucknow is the capital of Uttar Pradesh' or a full news article)"
             className="w-full min-h-[160px] p-6 rounded-2xl bg-white/80 border border-zinc-200 text-zinc-900 placeholder:text-zinc-400 focus:outline-none focus:ring-4 focus:ring-zinc-900/5 focus:border-zinc-300 focus:bg-white transition-all resize-y text-base md:text-lg font-medium shadow-inner"
           />
         </div>
@@ -205,9 +209,25 @@ const DemoSection = () => {
         </div>
       </div>
 
-      {/* Modern Analytics Dashboard Render */}
+      {/* Analytics Dashboard */}
       {result && (
         <div className="animate-in fade-in slide-in-from-bottom-8 duration-700 ease-out space-y-6">
+          {/* Input Type Badge + Timing */}
+          <div className="flex items-center justify-between">
+            {inputTypeConfig && (
+              <div className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-bold uppercase tracking-wide ${inputTypeConfig.color}`}>
+                <inputTypeConfig.icon className="w-3.5 h-3.5" />
+                {inputTypeConfig.label}
+              </div>
+            )}
+            {result.totalTime && (
+              <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-50 border border-zinc-200 text-xs font-semibold text-zinc-500">
+                <Zap className="w-3.5 h-3.5" />
+                {result.totalTime}s — 6 parallel tasks
+              </div>
+            )}
+          </div>
+
           <VerdictPanel 
             label={result.finalVerdictLabel}
             transformerLabel={result.transformer.label}
@@ -216,6 +236,7 @@ const DemoSection = () => {
             agreementScore={result.agreementScore}
             robustnessScore={result.robustnessScore}
             verificationWeights={result.verificationWeights}
+            inputType={result.inputType}
           />
 
           {/* Verification status banner */}
@@ -230,7 +251,12 @@ const DemoSection = () => {
             <ChartSection transformerConf={result.transformer.confidence} hybridConf={result.hybrid.confidence} />
             <FeatureBars {...result.features} />
             <StatsGrid {...result.stats} />
-            <OnlineVerification verification={result.verification} />
+            <OnlineVerification 
+              wikipedia={result.wikipedia}
+              verification={result.verification}
+              verificationSource={result.verificationSource}
+              inputType={result.inputType}
+            />
           </div>
 
           <div className="grid grid-cols-1">

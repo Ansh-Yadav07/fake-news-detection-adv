@@ -1,7 +1,13 @@
 import React from 'react';
-import { AlertCircle, CheckCircle2, HelpCircle, ShieldCheck, AlertTriangle, ShieldAlert } from 'lucide-react';
+import { AlertCircle, CheckCircle2, HelpCircle, ShieldCheck, AlertTriangle, ShieldAlert, BookOpen, Newspaper, Zap } from 'lucide-react';
 
 const verdictConfig = {
+  'VERIFIED FACT': {
+    Icon: BookOpen,
+    colorClass: 'text-emerald-900 bg-emerald-50 border-emerald-200',
+    badgeClass: 'bg-emerald-800 text-white',
+    barColor: 'bg-emerald-800',
+  },
   'VERIFIED': {
     Icon: ShieldCheck,
     colorClass: 'text-emerald-900 bg-emerald-50 border-emerald-200',
@@ -52,9 +58,20 @@ const verdictConfig = {
   },
 };
 
-const VerdictPanel = ({ label, transformerLabel, hybridLabel, explanation, agreementScore, robustnessScore, verificationWeights }) => {
+const inputTypeMeta = {
+  fact_claim: { label: 'Fact Claim', Icon: BookOpen },
+  news_article: { label: 'News Article', Icon: Newspaper },
+  mixed: { label: 'Mixed', Icon: Zap },
+};
+
+const VerdictPanel = ({ label, transformerLabel, hybridLabel, explanation, agreementScore, robustnessScore, verificationWeights, inputType }) => {
   const config = verdictConfig[label] || verdictConfig['UNCERTAIN'];
   const { Icon, colorClass, badgeClass, barColor } = config;
+  const itMeta = inputType ? inputTypeMeta[inputType] : null;
+
+  // Determine which weight segments to show based on available weights
+  const hasWiki = verificationWeights && verificationWeights.wikipedia > 0;
+  const hasGNews = verificationWeights && (verificationWeights.gnews > 0 || verificationWeights.credibility > 0);
 
   return (
     <div className={`border rounded-2xl p-6 md:p-8 flex flex-col md:flex-row gap-8 items-center shadow-sm relative overflow-hidden ${colorClass}`}>
@@ -95,49 +112,69 @@ const VerdictPanel = ({ label, transformerLabel, hybridLabel, explanation, agree
           </div>
         </div>
 
-        {/* Verification Weight Breakdown */}
+        {/* Signal Weights Visualization */}
         {verificationWeights && (
           <div className="pt-4 border-t border-current/10">
             <div className="text-xs font-bold uppercase tracking-wider mb-3 opacity-70">
               Signal Weights
             </div>
-            <div className="flex gap-1.5 h-2 rounded-full overflow-hidden bg-black/5">
+            <div className="flex gap-1 h-2 rounded-full overflow-hidden bg-black/5">
+              {hasWiki && (
+                <div
+                  className="bg-violet-500 transition-all duration-1000"
+                  style={{ width: `${verificationWeights.wikipedia * 0.6}%` }}
+                  title={`Wikipedia: ${verificationWeights.wikipedia}%`}
+                />
+              )}
+              {hasGNews && (
+                <div
+                  className="bg-sky-500 transition-all duration-1000"
+                  style={{ width: `${verificationWeights.gnews * 0.5}%` }}
+                  title={`GNews: ${verificationWeights.gnews}%`}
+                />
+              )}
               <div
-                className="rounded-l-full bg-emerald-500 transition-all duration-1000"
-                style={{ width: `${verificationWeights.verification * 0.5}%` }}
-                title={`Verification: ${verificationWeights.verification}%`}
-              />
-              <div
-                className="bg-sky-500 transition-all duration-1000"
+                className="bg-zinc-600 transition-all duration-1000"
                 style={{ width: `${verificationWeights.ml * 0.2}%` }}
                 title={`ML Models: ${verificationWeights.ml}%`}
               />
-              <div
-                className="bg-violet-500 transition-all duration-1000"
-                style={{ width: `${verificationWeights.credibility * 0.15}%` }}
-                title={`Credibility: ${verificationWeights.credibility}%`}
-              />
+              {hasGNews && (
+                <div
+                  className="bg-emerald-500 transition-all duration-1000"
+                  style={{ width: `${verificationWeights.credibility * 0.15}%` }}
+                  title={`Credibility: ${verificationWeights.credibility}%`}
+                />
+              )}
               <div
                 className="bg-amber-500 transition-all duration-1000"
                 style={{ width: `${verificationWeights.linguistic * 0.1}%` }}
                 title={`Linguistic: ${verificationWeights.linguistic}%`}
               />
               <div
-                className="rounded-r-full bg-zinc-400 transition-all duration-1000"
+                className="bg-zinc-400 transition-all duration-1000"
                 style={{ width: `${verificationWeights.clickbait * 0.05}%` }}
                 title={`Clickbait: ${verificationWeights.clickbait}%`}
               />
             </div>
             <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2">
+              {hasWiki && (
+                <span className="text-[10px] font-semibold text-zinc-500 flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-full bg-violet-500 inline-block" /> Wikipedia {verificationWeights.wikipedia}%
+                </span>
+              )}
+              {hasGNews && (
+                <span className="text-[10px] font-semibold text-zinc-500 flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-full bg-sky-500 inline-block" /> GNews {verificationWeights.gnews}%
+                </span>
+              )}
               <span className="text-[10px] font-semibold text-zinc-500 flex items-center gap-1">
-                <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" /> Verification {verificationWeights.verification}%
+                <span className="w-2 h-2 rounded-full bg-zinc-600 inline-block" /> ML {verificationWeights.ml}%
               </span>
-              <span className="text-[10px] font-semibold text-zinc-500 flex items-center gap-1">
-                <span className="w-2 h-2 rounded-full bg-sky-500 inline-block" /> ML {verificationWeights.ml}%
-              </span>
-              <span className="text-[10px] font-semibold text-zinc-500 flex items-center gap-1">
-                <span className="w-2 h-2 rounded-full bg-violet-500 inline-block" /> Credibility {verificationWeights.credibility}%
-              </span>
+              {hasGNews && (
+                <span className="text-[10px] font-semibold text-zinc-500 flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" /> Credibility {verificationWeights.credibility}%
+                </span>
+              )}
               <span className="text-[10px] font-semibold text-zinc-500 flex items-center gap-1">
                 <span className="w-2 h-2 rounded-full bg-amber-500 inline-block" /> Linguistic {verificationWeights.linguistic}%
               </span>

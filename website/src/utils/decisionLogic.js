@@ -1,37 +1,59 @@
 /**
- * Decision Logic for Fake News Detection
+ * Decision Logic for Fake News Detection — v2 (Parallel Verification)
  * 
- * === WITH VERIFICATION (new flow) ===
- * Weights:
- *   Online Verification = 50%
- *   ML Models          = 20%
- *   Source Credibility  = 15%
- *   Linguistic Features = 10%
- *   Clickbait Detection = 5%
+ * === INPUT-AWARE WEIGHTING ===
  * 
- * Verdict Categories: VERIFIED, LIKELY REAL, UNVERIFIED, SUSPICIOUS, LIKELY FAKE
+ * Fact Claims (< 25 words, factual):
+ *   Wikipedia       = 60%
+ *   ML Models       = 20%
+ *   Linguistic      = 10%
+ *   Clickbait       = 10%
+ * 
+ * News Articles (> 25 words, events):
+ *   GNews           = 50%
+ *   ML Models       = 20%
+ *   Source Credibility = 15%
+ *   Linguistic      = 10%
+ *   Clickbait       = 5%
+ * 
+ * Mixed (both sources):
+ *   Wikipedia       = 30%
+ *   GNews           = 25%
+ *   ML Models       = 20%
+ *   Linguistic      = 15%
+ *   Clickbait       = 10%
  * 
  * === WITHOUT VERIFICATION (legacy fallback) ===
- * Key principles:
- * - For LONG texts (50+ words): ML models are dominant, linguistics are minor modifiers
- * - For MEDIUM texts (15-50 words): Balanced between models and linguistics
- * - For SHORT texts (<15 words): Linguistic features carry MUCH more weight
- *   because ML models trained on full articles are unreliable on headlines
+ * Text-length-based ML/linguistic weighting (unchanged)
  * 
- * - Transformer model gets higher weight (60%) as it's the stronger model
- * - Clickbait/linguistic scores can shift or flip verdict for short texts
+ * Verdict Categories: VERIFIED, VERIFIED FACT, LIKELY REAL, UNVERIFIED, SUSPICIOUS, LIKELY FAKE
  */
 
 const TRANSFORMER_WEIGHT = 0.60;
 const LR_WEIGHT = 0.40;
 
-// Verification-aware weights
-const WEIGHTS = {
-  ONLINE_VERIFICATION: 0.50,
+// Weight profiles by input type
+const FACT_WEIGHTS = {
+  WIKIPEDIA: 0.60,
+  ML_MODELS: 0.20,
+  LINGUISTIC: 0.10,
+  CLICKBAIT: 0.10
+};
+
+const NEWS_WEIGHTS = {
+  GNEWS: 0.50,
   ML_MODELS: 0.20,
   SOURCE_CREDIBILITY: 0.15,
-  LINGUISTIC_FEATURES: 0.10,
-  CLICKBAIT_DETECTION: 0.05
+  LINGUISTIC: 0.10,
+  CLICKBAIT: 0.05
+};
+
+const MIXED_WEIGHTS = {
+  WIKIPEDIA: 0.30,
+  GNEWS: 0.25,
+  ML_MODELS: 0.20,
+  LINGUISTIC: 0.15,
+  CLICKBAIT: 0.10
 };
 
 /**
@@ -43,7 +65,6 @@ export function calculateAgreement(t_conf, h_conf, t_label, h_label) {
     const avgConf = (t_conf + h_conf) / 2;
     return Math.round(avgConf * 100);
   }
-  // They disagree — agreement is inversely proportional to confidence
   const disagreement = (t_conf + h_conf) / 2;
   return Math.round(Math.max(0, (1 - disagreement) * 100));
 }
@@ -94,7 +115,7 @@ function generateInsights(t_label, t_conf, h_label, h_conf, clickbait_score, pun
     insights.push(`Low clickbait score (${clickbait_score}%) — writing style appears measured and professional.`);
   }
 
-  // Text length analysis — critical for understanding model reliability
+  // Text length analysis
   if (wordCount < 10) {
     insights.push(`Very short text (${wordCount} words) — ML models are unreliable on headlines this short. Linguistic analysis weighted heavily.`);
   } else if (wordCount < 20) {
@@ -129,14 +150,48 @@ function generateInsights(t_label, t_conf, h_label, h_conf, clickbait_score, pun
 }
 
 /**
- * Generate enhanced insights that include verification findings.
+ * Generate Wikipedia-specific insights.
  */
-function generateInsightsWithVerification(t_label, t_conf, h_label, h_conf, clickbait_score, punctuation_score, uppercase_ratio, wordCount, final_label, verification) {
-  // Start with base ML/linguistic insights
-  const insights = generateInsights(t_label, t_conf, h_label, h_conf, clickbait_score, punctuation_score, uppercase_ratio, wordCount, final_label);
+function generateWikipediaInsights(wikipedia) {
+  const insights = [];
+  if (!wikipedia) return insights;
 
-  // Append verification-specific insights from the backend
-  if (verification && verification.insights) {
+  const status = wikipedia.status || "NOT FOUND";
+  const score = wikipedia.verification_score || 0;
+  const title = wikipedia.wiki_title || "";
+
+  if (status === "VERIFIED FACT") {
+    insights.push(`Wikipedia confirms the statement.`);
+    insights.push(`Fact matches trusted knowledge sources.`);
+    insights.push(`Wikipedia verification score: ${score}%.`);
+  } else if (status === "PARTIALLY VERIFIED") {
+    insights.push(`Wikipedia contains related information in "${title}".`);
+    insights.push(`Wikipedia verification score: ${score}%.`);
+  } else if (status === "NOT FOUND") {
+    insights.push(`No relevant Wikipedia article found for this claim.`);
+  } else {
+    insights.push(`Wikipedia article "${title}" found but claim could not be fully verified (${score}%).`);
+  }
+
+  // Add description
+  if (wikipedia.wiki_extract) {
+    const snippet = wikipedia.wiki_extract.length > 120
+      ? wikipedia.wiki_extract.substring(0, 120) + '...'
+      : wikipedia.wiki_extract;
+    insights.push(`Wikipedia excerpt: "${snippet}"`);
+  }
+
+  return insights;
+}
+
+/**
+ * Generate GNews-specific insights.
+ */
+function generateGNewsInsights(verification) {
+  const insights = [];
+  if (!verification) return insights;
+
+  if (verification.insights) {
     verification.insights.forEach(insight => {
       insights.push(insight);
     });
@@ -146,18 +201,26 @@ function generateInsightsWithVerification(t_label, t_conf, h_label, h_conf, clic
 }
 
 /**
- * Core decision function — determines the final FAKE/REAL/UNCERTAIN verdict.
+ * Generate enhanced insights that include ALL verification findings.
+ */
+function generateInsightsWithVerification(t_label, t_conf, h_label, h_conf, clickbait_score, punctuation_score, uppercase_ratio, wordCount, final_label, wikipedia, verification) {
+  // Start with base ML/linguistic insights
+  const insights = generateInsights(t_label, t_conf, h_label, h_conf, clickbait_score, punctuation_score, uppercase_ratio, wordCount, final_label);
+
+  // Add Wikipedia insights
+  const wikiInsights = generateWikipediaInsights(wikipedia);
+  wikiInsights.forEach(i => insights.push(i));
+
+  // Add GNews insights
+  const gnewsInsights = generateGNewsInsights(verification);
+  gnewsInsights.forEach(i => insights.push(i));
+
+  return insights;
+}
+
+/**
+ * Core decision function — determines the final verdict.
  * LEGACY: Used when verification data is NOT available (fallback).
- * 
- * The key insight: ML models trained on full articles are UNRELIABLE on short
- * headlines (< 15 words). For short text, linguistic features (clickbait,
- * uppercase, punctuation) carry much more weight.
- * 
- * Logic flow:
- * 1. Compute linguistic fake score from writing style
- * 2. Determine how much to trust ML models vs linguistics (based on text length)
- * 3. Compute weighted final score
- * 4. Apply final threshold checks
  */
 export function getEnhancedDecision(t_label, t_conf, h_label, h_conf, clickbait_score, punctuation_score, uppercase_ratio, wordCount = 50) {
   let final_label = "UNCERTAIN";
@@ -166,47 +229,39 @@ export function getEnhancedDecision(t_label, t_conf, h_label, h_conf, clickbait_
 
   const agreement = calculateAgreement(t_conf, h_conf, t_label, h_label);
 
-  // ---- STEP 1: Compute linguistic fake score ----
+  // STEP 1: Compute linguistic fake score
   const linguisticFakeScore = computeLinguisticFakeScore(clickbait_score, punctuation_score, uppercase_ratio);
 
-  // ---- STEP 2: Determine trust weights based on text length ----
-  // Short text → trust linguistics more, models less
-  // Long text → trust models more, linguistics less
+  // STEP 2: Determine trust weights based on text length
   let modelTrust, linguisticTrust;
 
   if (wordCount < 10) {
-    // Ultra-short: headlines, tweets — models trained on articles are unreliable here
     modelTrust = 0.15;
     linguisticTrust = 0.85;
   } else if (wordCount < 20) {
-    // Short: brief headlines
     modelTrust = 0.50;
     linguisticTrust = 0.50;
   } else if (wordCount < 50) {
-    // Medium: paragraphs
     modelTrust = 0.75;
     linguisticTrust = 0.25;
   } else {
-    // Long: full articles — models are most reliable
     modelTrust = 0.85;
     linguisticTrust = 0.15;
   }
 
-  // ---- STEP 3: Compute ML model fake score ----
-  // Higher = more evidence for FAKE from ML models
+  // STEP 3: Compute ML model fake score
   const t_fake_score = t_label === "FAKE" ? t_conf : (1 - t_conf);
   const h_fake_score = h_label === "FAKE" ? h_conf : (1 - h_conf);
   const mlFakeScore = (TRANSFORMER_WEIGHT * t_fake_score) + (LR_WEIGHT * h_fake_score);
 
-  // ---- STEP 4: Weighted final fake score ----
+  // STEP 4: Weighted final fake score
   const finalFakeScore = (modelTrust * mlFakeScore) + (linguisticTrust * linguisticFakeScore);
 
-  // ---- STEP 5: Determine verdict ----
+  // STEP 5: Determine verdict
   if (finalFakeScore > 0.55) {
     final_label = "FAKE";
     confidence = finalFakeScore;
 
-    // Build reason
     if (linguisticFakeScore > 0.4 && mlFakeScore < 0.5) {
       reason = `Linguistic analysis overrides uncertain ML models — strong clickbait/sensationalist patterns detected (${clickbait_score}% clickbait score).`;
     } else if (t_label === "FAKE" && h_label === "FAKE") {
@@ -227,13 +282,11 @@ export function getEnhancedDecision(t_label, t_conf, h_label, h_conf, clickbait_
       reason = `Weighted analysis indicates REAL — combined evidence score ${((1 - finalFakeScore) * 100).toFixed(0)}%.`;
     }
 
-    // Additional check: if clickbait is high, add a warning
     if (clickbait_score > 40) {
       reason += ` Note: some clickbait patterns detected but not enough to override model predictions.`;
     }
 
   } else {
-    // Between 0.40 and 0.55 — genuinely uncertain
     final_label = "UNCERTAIN";
     confidence = 0.5;
     reason = `Analysis is inconclusive — combined fake evidence is ${(finalFakeScore * 100).toFixed(0)}%, which is in the uncertain zone.`;
@@ -243,10 +296,8 @@ export function getEnhancedDecision(t_label, t_conf, h_label, h_conf, clickbait_
     }
   }
 
-  // ---- STEP 6: Final confidence bounds ----
   confidence = Math.max(0.1, Math.min(0.99, confidence));
 
-  // Generate detailed insights
   const insights = generateInsights(
     t_label, t_conf, h_label, h_conf,
     clickbait_score, punctuation_score, uppercase_ratio,
@@ -263,84 +314,148 @@ export function getEnhancedDecision(t_label, t_conf, h_label, h_conf, clickbait_
 }
 
 /**
- * Enhanced decision function WITH online verification.
+ * Enhanced decision function WITH verification — v2 (parallel).
  * 
- * Uses a weighted scoring system where online verification is the strongest signal:
- *   Online Verification = 50%
- *   ML Models          = 20%
- *   Source Credibility  = 15%
- *   Linguistic Features = 10%
- *   Clickbait Detection = 5%
- *
- * Verdict categories: VERIFIED, LIKELY REAL, UNVERIFIED, SUSPICIOUS, LIKELY FAKE
+ * Routes to different weight profiles based on input type:
+ * - fact_claim: Wikipedia is dominant signal (60%)
+ * - news_article: GNews is dominant signal (50%)
+ * - mixed: Both sources combined
+ * 
+ * Verdict categories: VERIFIED, VERIFIED FACT, LIKELY REAL, UNVERIFIED, SUSPICIOUS, LIKELY FAKE
  * 
  * Override rules:
- * - If verification_score > 80 AND trusted_sources >= 3 → verification is primary signal
- * - If supporting_articles == 0 → UNVERIFIED (never auto-classify as fake)
- * - If contradicting evidence → SUSPICIOUS
+ * - Wikipedia score > 70 for fact claims → VERIFIED FACT
+ * - GNews verification_score > 80 AND trusted_sources >= 3 → VERIFIED
+ * - No evidence at all → UNVERIFIED (never auto-fake)
+ * - Contradicting evidence → SUSPICIOUS
  */
 export function getEnhancedDecisionWithVerification(
   t_label, t_conf, h_label, h_conf,
   clickbait_score, punctuation_score, uppercase_ratio,
-  wordCount, verification
+  wordCount, inputType, wikipedia, verification
 ) {
   const agreement = calculateAgreement(t_conf, h_conf, t_label, h_label);
 
   // ---- Compute component scores (0-1 scale, higher = more evidence for REAL) ----
 
-  // 1. Online Verification score (0-1)
-  const verificationRealScore = (verification.verification_score || 0) / 100;
-
-  // 2. ML Model score (0-1, higher = more evidence for REAL)
+  // ML Model score
   const t_real_score = t_label === "REAL" ? t_conf : (1 - t_conf);
   const h_real_score = h_label === "REAL" ? h_conf : (1 - h_conf);
   const mlRealScore = (TRANSFORMER_WEIGHT * t_real_score) + (LR_WEIGHT * h_real_score);
 
-  // 3. Source Credibility score (0-1)
-  const trustedCount = verification.trusted_source_count || 0;
-  const supportingCount = verification.supporting_articles || 0;
-  const credibilityScore = Math.min(1.0, trustedCount / 4); // 4+ trusted sources = max
-
-  // 4. Linguistic "real" score (inverse of fake score, 0-1)
+  // Linguistic "real" score (inverse of fake score)
   const linguisticFakeScore = computeLinguisticFakeScore(clickbait_score, punctuation_score, uppercase_ratio);
   const linguisticRealScore = 1 - linguisticFakeScore;
 
-  // 5. Clickbait "real" score (inverse, 0-1)
+  // Clickbait "real" score
   const clickbaitRealScore = 1 - (clickbait_score / 100);
 
-  // ---- Compute weighted final score ----
-  const finalRealScore =
-    (WEIGHTS.ONLINE_VERIFICATION * verificationRealScore) +
-    (WEIGHTS.ML_MODELS * mlRealScore) +
-    (WEIGHTS.SOURCE_CREDIBILITY * credibilityScore) +
-    (WEIGHTS.LINGUISTIC_FEATURES * linguisticRealScore) +
-    (WEIGHTS.CLICKBAIT_DETECTION * clickbaitRealScore);
+  // Wikipedia score
+  const wikiScore = wikipedia ? (wikipedia.verification_score || 0) / 100 : 0;
+  const wikiAvailable = wikipedia && wikipedia.status && wikipedia.status !== "NOT FOUND";
+
+  // GNews score
+  const gnewsScore = verification ? (verification.verification_score || 0) / 100 : 0;
+  const gnewsAvailable = verification && verification.supporting_articles > 0;
+  const trustedCount = verification ? (verification.trusted_source_count || 0) : 0;
+  const supportingCount = verification ? (verification.supporting_articles || 0) : 0;
+  const credibilityScore = Math.min(1.0, trustedCount / 4);
+
+  // ---- Select weight profile based on input type ----
+  let finalRealScore = 0;
+  let activeWeights = {};
+  let verificationSource = "none";
+
+  if (inputType === "fact_claim") {
+    // Fact claim → Wikipedia is dominant
+    finalRealScore =
+      (FACT_WEIGHTS.WIKIPEDIA * wikiScore) +
+      (FACT_WEIGHTS.ML_MODELS * mlRealScore) +
+      (FACT_WEIGHTS.LINGUISTIC * linguisticRealScore) +
+      (FACT_WEIGHTS.CLICKBAIT * clickbaitRealScore);
+
+    activeWeights = {
+      wikipedia: Math.round(wikiScore * 100),
+      ml: Math.round(mlRealScore * 100),
+      linguistic: Math.round(linguisticRealScore * 100),
+      clickbait: Math.round(clickbaitRealScore * 100),
+      gnews: 0,
+      credibility: 0
+    };
+    verificationSource = "wikipedia";
+
+  } else if (inputType === "news_article") {
+    // News article → GNews is dominant
+    finalRealScore =
+      (NEWS_WEIGHTS.GNEWS * gnewsScore) +
+      (NEWS_WEIGHTS.ML_MODELS * mlRealScore) +
+      (NEWS_WEIGHTS.SOURCE_CREDIBILITY * credibilityScore) +
+      (NEWS_WEIGHTS.LINGUISTIC * linguisticRealScore) +
+      (NEWS_WEIGHTS.CLICKBAIT * clickbaitRealScore);
+
+    activeWeights = {
+      gnews: Math.round(gnewsScore * 100),
+      ml: Math.round(mlRealScore * 100),
+      credibility: Math.round(credibilityScore * 100),
+      linguistic: Math.round(linguisticRealScore * 100),
+      clickbait: Math.round(clickbaitRealScore * 100),
+      wikipedia: 0
+    };
+    verificationSource = "gnews";
+
+  } else {
+    // Mixed → use both sources
+    finalRealScore =
+      (MIXED_WEIGHTS.WIKIPEDIA * wikiScore) +
+      (MIXED_WEIGHTS.GNEWS * gnewsScore) +
+      (MIXED_WEIGHTS.ML_MODELS * mlRealScore) +
+      (MIXED_WEIGHTS.LINGUISTIC * linguisticRealScore) +
+      (MIXED_WEIGHTS.CLICKBAIT * clickbaitRealScore);
+
+    activeWeights = {
+      wikipedia: Math.round(wikiScore * 100),
+      gnews: Math.round(gnewsScore * 100),
+      ml: Math.round(mlRealScore * 100),
+      linguistic: Math.round(linguisticRealScore * 100),
+      clickbait: Math.round(clickbaitRealScore * 100),
+      credibility: Math.round(credibilityScore * 100)
+    };
+    verificationSource = wikiAvailable && gnewsAvailable ? "both" :
+                          wikiAvailable ? "wikipedia" :
+                          gnewsAvailable ? "gnews" : "none";
+  }
 
   // ---- Apply override rules and determine verdict ----
   let final_label = "UNVERIFIED";
   let confidence = 0;
   let reason = "";
 
-  const verificationStatus = verification.status || "UNVERIFIED";
+  // OVERRIDE RULE 1: Wikipedia confirms a fact claim
+  if (inputType === "fact_claim" && wikiAvailable && wikiScore > 0.70) {
+    final_label = "VERIFIED FACT";
+    confidence = Math.max(finalRealScore, 0.85);
+    reason = `Wikipedia confirms this claim. ${wikipedia.message || ''}`;
 
-  // OVERRIDE RULE 1: Strong verification override
-  if (verificationRealScore > 0.80 && trustedCount >= 3) {
+    if (clickbait_score > 50) {
+      reason += ` Note: clickbait patterns detected (${clickbait_score}%) but overridden by Wikipedia evidence.`;
+    }
+  }
+  // OVERRIDE RULE 2: Strong GNews verification
+  else if (gnewsScore > 0.80 && trustedCount >= 3) {
     final_label = "VERIFIED";
     confidence = Math.max(finalRealScore, 0.85);
     reason = `Multiple trusted news organizations independently confirm this claim. Verification score: ${verification.verification_score}% with ${trustedCount} trusted sources.`;
 
-    // Even if clickbait is high, verified trumps it
     if (clickbait_score > 50) {
       reason += ` Note: clickbait patterns detected (${clickbait_score}%) but overridden by strong real-world evidence.`;
     }
   }
-  // OVERRIDE RULE 2: No evidence found — UNVERIFIED, never auto-fake
-  else if (supportingCount === 0) {
-    // Fall back to ML-only decision but label as UNVERIFIED
+  // OVERRIDE RULE 3: No evidence found at all
+  else if (!wikiAvailable && !gnewsAvailable) {
     if (finalRealScore > 0.55) {
       final_label = "UNVERIFIED";
       confidence = finalRealScore;
-      reason = `No online evidence found. ML models suggest real content but cannot be verified online.`;
+      reason = `No online evidence found. ML models suggest real content but cannot be verified.`;
     } else if (finalRealScore < 0.40) {
       final_label = "LIKELY FAKE";
       confidence = 1 - finalRealScore;
@@ -351,23 +466,25 @@ export function getEnhancedDecisionWithVerification(
       reason = `No online evidence available. ML analysis is inconclusive.`;
     }
   }
-  // OVERRIDE RULE 3: Contradicting evidence
-  else if (verificationStatus === "SUSPICIOUS") {
-    final_label = "SUSPICIOUS";
-    confidence = 0.6;
-    reason = `Conflicting information detected from trusted sources. ${verification.message || ''}`;
-  }
   // Normal weighted decision
   else if (finalRealScore > 0.70) {
-    final_label = "VERIFIED";
+    if (inputType === "fact_claim" && wikiAvailable) {
+      final_label = "VERIFIED FACT";
+    } else {
+      final_label = "VERIFIED";
+    }
     confidence = finalRealScore;
-    reason = `Strong combined evidence supports this article. Verification score: ${verification.verification_score}%.`;
+    const scoreSource = inputType === "fact_claim" ? `Wikipedia: ${wikipedia?.verification_score}%` : `GNews: ${verification?.verification_score}%`;
+    reason = `Strong combined evidence supports this claim. ${scoreSource}.`;
   } else if (finalRealScore > 0.55) {
     final_label = "LIKELY REAL";
     confidence = finalRealScore;
-    reason = `Multiple signals suggest this article is likely real. ${supportingCount} supporting articles found online.`;
-    if (trustedCount > 0) {
-      reason += ` ${trustedCount} trusted source${trustedCount > 1 ? 's' : ''} found.`;
+    reason = `Multiple signals suggest this content is likely real.`;
+    if (supportingCount > 0) {
+      reason += ` ${supportingCount} supporting articles found online.`;
+    }
+    if (wikiAvailable) {
+      reason += ` Wikipedia contains related information.`;
     }
   } else if (finalRealScore > 0.40) {
     final_label = "UNVERIFIED";
@@ -376,21 +493,24 @@ export function getEnhancedDecisionWithVerification(
   } else if (finalRealScore > 0.25) {
     final_label = "SUSPICIOUS";
     confidence = 1 - finalRealScore;
-    reason = `Multiple signals raise concerns. Low verification score (${verification.verification_score}%) combined with ML analysis.`;
+    reason = `Multiple signals raise concerns.`;
+    if (verification) {
+      reason += ` Low verification score (${verification.verification_score}%).`;
+    }
   } else {
     final_label = "LIKELY FAKE";
     confidence = 1 - finalRealScore;
-    reason = `Strong evidence suggests this content is not reliable. Low online verification and ML models flag suspicious patterns.`;
+    reason = `Strong evidence suggests this content is not reliable. Low verification and ML models flag suspicious patterns.`;
   }
 
-  // ---- Final confidence bounds ----
+  // Final confidence bounds
   confidence = Math.max(0.1, Math.min(0.99, confidence));
 
-  // Generate insights including verification
+  // Generate insights
   const insights = generateInsightsWithVerification(
     t_label, t_conf, h_label, h_conf,
     clickbait_score, punctuation_score, uppercase_ratio,
-    wordCount, final_label, verification
+    wordCount, final_label, wikipedia, verification
   );
 
   return {
@@ -399,28 +519,21 @@ export function getEnhancedDecisionWithVerification(
     agreement,
     reason,
     insights,
-    weights: {
-      verification: Math.round(verificationRealScore * 100),
-      ml: Math.round(mlRealScore * 100),
-      credibility: Math.round(credibilityScore * 100),
-      linguistic: Math.round(linguisticRealScore * 100),
-      clickbait: Math.round(clickbaitRealScore * 100)
-    }
+    verification_source: verificationSource,
+    input_type: inputType,
+    weights: activeWeights
   };
 }
 
 /**
  * Calculate analysis robustness score (0-10).
- * Considers model confidence, agreement, and text length.
  */
 export function calculateRobustness(t_conf, h_conf, agreement, wordCount) {
   let baseScore = ((t_conf + h_conf) / 2) * 10;
 
-  // Agreement bonus/penalty
   if (agreement < 50) baseScore -= 1.5;
   else if (agreement > 80) baseScore += 0.5;
 
-  // Word count factor — short text = less robust
   if (wordCount < 10) baseScore -= 2.5;
   else if (wordCount < 20) baseScore -= 1.5;
   else if (wordCount < 50) baseScore -= 0.5;
@@ -431,16 +544,23 @@ export function calculateRobustness(t_conf, h_conf, agreement, wordCount) {
 }
 
 /**
- * Calculate enhanced robustness that includes verification signal.
+ * Calculate enhanced robustness that includes verification signals.
  */
-export function calculateRobustnessWithVerification(t_conf, h_conf, agreement, wordCount, verification) {
+export function calculateRobustnessWithVerification(t_conf, h_conf, agreement, wordCount, wikipedia, verification) {
   let baseScore = calculateRobustness(t_conf, h_conf, agreement, wordCount);
 
+  // Wikipedia boost
+  if (wikipedia) {
+    const wikiScore = (wikipedia.verification_score || 0) / 100;
+    if (wikiScore > 0.7) baseScore += 2.0;
+    else if (wikiScore > 0.4) baseScore += 1.0;
+  }
+
+  // GNews boost
   if (verification) {
     const verScore = (verification.verification_score || 0) / 100;
     const trustedCount = verification.trusted_source_count || 0;
 
-    // Verification boost
     if (verScore > 0.7 && trustedCount >= 2) baseScore += 2.0;
     else if (verScore > 0.5) baseScore += 1.0;
     else if (verScore < 0.2 && verification.supporting_articles === 0) baseScore -= 1.0;
