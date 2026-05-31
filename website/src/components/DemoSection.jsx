@@ -5,7 +5,7 @@ import StatsGrid from './analyzer/StatsGrid';
 import FeatureBars from './analyzer/FeatureBars';
 import VerdictPanel from './analyzer/VerdictPanel';
 import InsightsList from './analyzer/InsightsList';
-import { getFinalVerdict, calculateAgreement, generateExplanations, getWeightedFusion } from '../utils/decisionLogic';
+import { getEnhancedDecision, calculateRobustness } from '../utils/decisionLogic';
 
 const DemoSection = () => {
   const [input, setInput] = useState('');
@@ -19,7 +19,7 @@ const DemoSection = () => {
     setResult(null);
 
     try {
-      const apiUrl = import.meta.env.VITE_API_URL || 'https://fake-news-detection-5gpf.onrender.com/predict';
+      const apiUrl = import.meta.env.VITE_API_URL || 'http://127.0.0.1:5001/predict';
       const response = await fetch(apiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -49,18 +49,23 @@ const DemoSection = () => {
         complexity: rawFeatures.complexity || 5
       };
 
-      // 1. Calculate Agreement
-      const agreementRaw = calculateAgreement(t_conf, h_conf, t_label, h_label);
+      // 2. Enhanced Verdict Logic
+      // Assuming clickbait is provided mostly as 0-1, so * 100 for score calculation
+      const clickbaitScore = Math.round(computedFeatures.clickbait * 100);
+      const uppercaseScore = computedFeatures.uppercase * 100;
+      const pctScore = computedFeatures.punctuation * 100;
+
+      const decision = getEnhancedDecision(
+        t_label, t_conf,
+        h_label, h_conf,
+        clickbaitScore, pctScore, uppercaseScore
+      );
       
-      // 2. Final Verdict Logic
-      let finalVerdictLabel = getFinalVerdict(t_label, t_conf, h_label, h_conf);
-      if (agreementRaw > 0.7 && finalVerdictLabel === 'UNCERTAIN') {
-         // Fallback if agreement is high but logic returned uncertain
-         finalVerdictLabel = t_conf > h_conf ? t_label : h_label;
-      }
+      let finalVerdictLabel = decision.final_label;
+      const agreementRaw = decision.agreement / 100; // Unpack percentage logic to old raw usage for calculateRobustness
       
-      // 3. Dynamic Explanations
-      const explanations = generateExplanations(computedFeatures, t_label, h_label, finalVerdictLabel);
+      // 3. Dynamic Explanations (wrap the new reason into the explanations array to fulfill legacy props)
+      const explanations = [decision.reason];
 
       const dashboardData = {
         transformer: { 
@@ -84,7 +89,7 @@ const DemoSection = () => {
           clickbait: Math.round(computedFeatures.clickbait * 100)
         },
         agreementScore: Math.round(agreementRaw * 100),
-        robustnessScore: 8.5,
+        robustnessScore: calculateRobustness(t_conf, h_conf, agreementRaw, wordCount),
         finalVerdictLabel: finalVerdictLabel,
         verdictExplanation: explanations.length > 0 ? explanations[0] : "Analysis complete.",
         explanations: explanations

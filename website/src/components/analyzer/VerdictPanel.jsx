@@ -3,8 +3,8 @@ import { AlertCircle, CheckCircle2, HelpCircle } from 'lucide-react';
 
 const VerdictPanel = ({ label, transformerLabel, hybridLabel, explanation, agreementScore, robustnessScore }) => {
   const isReal = label === 'REAL';
-  const isUncertain = label === 'UNCERTAIN' || transformerLabel !== hybridLabel;
-  const isFake = !isReal && !isUncertain;
+  const isUncertain = label === 'UNCERTAIN';
+  const isFake = label === 'FAKE';
 
   let Icon = AlertCircle;
   let colorClass = 'text-zinc-900 bg-zinc-100 border-zinc-200';

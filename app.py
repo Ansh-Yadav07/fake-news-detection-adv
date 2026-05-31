@@ -7,7 +7,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import nltk
 from nltk.corpus import stopwords
-from huggingface_hub import InferenceClient
+from transformers import pipeline
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -25,25 +25,25 @@ except Exception as e:
 
 # ---- Constants & API Config ----
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
-if not HF_TOKEN:
-    print("WARNING: HF_TOKEN environment variable not set!")
 
-# Don't initialize HF Inference Client - it causes timeouts on Render
-# We'll use the hybrid model only for now
-hf_client = None
-MODEL_ID = "anshy047/fake-news-detector-transformer"
+# We're running locally now for presentation
+local_transformer = None
+TRANSFORMER_MODEL_PATH = "models/transformer"
 
 MODEL_PATH = "models/ml_lr_model.pkl"
 TFIDF_PATH = "models/ml_tfidf.pkl"
 
-print("Loading local ML model...")
+print("Loading local models...")
 hybrid_clf = None
 tfidf = None
 try:
     hybrid_clf = joblib.load(MODEL_PATH)
     tfidf = joblib.load(TFIDF_PATH)
-    print(f"Local model loaded successfully!")
-    print("Transformer running remotely via HF API.")
+    print(f"Local ML models loaded successfully!")
+    
+    # Load the local transformer model
+    local_transformer = pipeline("text-classification", model=TRANSFORMER_MODEL_PATH, tokenizer=TRANSFORMER_MODEL_PATH, max_length=512, truncation=True)
+    print("Local Transformer loaded successfully!")
 except FileNotFoundError as e:
     print(f"ERROR: Model file not found: {e}")
 except Exception as e:
@@ -169,27 +169,21 @@ def predict():
         transformer_available = False
         
         try:
-            hf_result = get_hf_classification(text)
-            
-            if isinstance(hf_result, list) and len(hf_result) > 0 and isinstance(hf_result[0], list):
-                predictions = hf_result[0]
-            elif isinstance(hf_result, list):
-                predictions = hf_result
-            elif hasattr(hf_result, "get") and hf_result.get("error"):
-                raise Exception(f"HF Model Error: {hf_result.get('error')}")
+            if local_transformer:
+                hf_result = local_transformer(text)
+                
+                # Check for standard expected structures for pipeline
+                best_pred = max(hf_result, key=lambda x: x['score'])
+                t_label_raw = best_pred['label']
+                t_conf = best_pred['score']
+                
+                # Map labels
+                t_label = "REAL" if t_label_raw in ["LABEL_1", "1", "REAL"] else "FAKE"
+                transformer_available = True
             else:
-                raise Exception("Unexpected HF formatting")
-
-            # Get label with highest score
-            best_pred = max(predictions, key=lambda x: x['score'])
-            t_label_raw = best_pred['label']
-            t_conf = best_pred['score']
-            
-            # Map labels
-            t_label = "REAL" if t_label_raw in ["LABEL_1", "1", "REAL"] else "FAKE"
-            transformer_available = True
+                raise Exception("Local transformer model skipped or failed to load")
         except Exception as e:
-            print(f"Transformer API Error: {str(e)} - Will use hybrid model only")
+            print(f"Transformer Local Error: {str(e)} - Will use hybrid model only")
             t_label = None
             t_conf = None
         
