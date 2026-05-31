@@ -94,26 +94,28 @@ def compute_clickbait_score(text, uppercase_ratio, punct_ratio):
 
     # 1. Sensationalist trigger words (up to 0.40)
     trigger_count = sum(1 for trigger in CLICKBAIT_TRIGGERS if trigger in text_lower)
-    score += min(trigger_count * 0.12, 0.40)
+    score += min(trigger_count * 0.15, 0.40)
 
-    # 2. Excessive punctuation — !!! or ??? patterns (up to 0.15)
+    # 2. Excessive punctuation — !!! or ??? patterns (up to 0.20)
     exclamation_runs = len(re.findall(r'!{2,}', text))
     question_runs = len(re.findall(r'\?{2,}', text))
-    score += min((exclamation_runs + question_runs) * 0.08, 0.15)
+    score += min((exclamation_runs + question_runs) * 0.10, 0.20)
 
     # 3. General punctuation density (up to 0.10)
     if punct_ratio > 0.05:
         score += min((punct_ratio - 0.05) * 2.0, 0.10)
 
-    # 4. Excessive uppercase (up to 0.15)
-    if uppercase_ratio > 0.10:
-        score += min((uppercase_ratio - 0.10) * 1.5, 0.15)
+    # 4. Excessive uppercase ratio (up to 0.20)
+    if uppercase_ratio > 0.08:
+        score += min((uppercase_ratio - 0.08) * 2.0, 0.20)
 
-    # 5. ALL CAPS words pattern (up to 0.10)
-    caps_words = sum(1 for w in words if w.isupper() and len(w) > 2)
+    # 5. ALL CAPS words pattern — very strong clickbait signal (up to 0.25)
+    caps_words = sum(1 for w in words if w.isupper() and len(w) > 1)
     caps_ratio = caps_words / total_words
     if caps_ratio > 0.3:
-        score += min((caps_ratio - 0.3) * 0.5, 0.10)
+        score += min(caps_ratio * 0.35, 0.25)
+    elif caps_ratio > 0.15:
+        score += min((caps_ratio - 0.15) * 0.5, 0.10)
 
     # 6. Very short text (headlines are more likely clickbait) (up to 0.10)
     if total_words < 20:

@@ -2,10 +2,13 @@
  * Decision Logic for Fake News Detection
  * 
  * Key principles:
- * - ML model predictions (Transformer + LR) are the PRIMARY signals
- * - Linguistic features (clickbait, uppercase, punctuation) are SECONDARY modifiers
- * - Clickbait score modifies confidence but does NOT override model predictions alone
+ * - For LONG texts (50+ words): ML models are dominant, linguistics are minor modifiers
+ * - For MEDIUM texts (15-50 words): Balanced between models and linguistics
+ * - For SHORT texts (<15 words): Linguistic features carry MUCH more weight
+ *   because ML models trained on full articles are unreliable on headlines
+ * 
  * - Transformer model gets higher weight (60%) as it's the stronger model
+ * - Clickbait/linguistic scores can shift or flip verdict for short texts
  */
 
 const TRANSFORMER_WEIGHT = 0.60;
@@ -17,21 +20,41 @@ const LR_WEIGHT = 0.40;
  */
 export function calculateAgreement(t_conf, h_conf, t_label, h_label) {
   if (t_label === h_label) {
-    // Both agree — agreement is the average of their confidences
     const avgConf = (t_conf + h_conf) / 2;
     return Math.round(avgConf * 100);
   }
-  // They disagree — agreement is inversely proportional to the confidence gap
-  const confDiff = Math.abs(t_conf - h_conf);
-  // If one is very confident and the other isn't, agreement is very low
+  // They disagree — agreement is inversely proportional to confidence
   const disagreement = (t_conf + h_conf) / 2;
   return Math.round(Math.max(0, (1 - disagreement) * 100));
 }
 
 /**
+ * Compute a "linguistic fake score" from raw feature signals.
+ * Returns 0-1 where higher = more likely fake based on writing style alone.
+ */
+function computeLinguisticFakeScore(clickbait_score, punctuation_score, uppercase_ratio) {
+  let score = 0;
+
+  // Clickbait is the strongest linguistic signal
+  score += (clickbait_score / 100) * 0.50;
+
+  // Excessive uppercase (> 20%) is very suspicious
+  if (uppercase_ratio > 20) {
+    score += Math.min((uppercase_ratio - 20) / 80, 1.0) * 0.30;
+  }
+
+  // Heavy punctuation
+  if (punctuation_score > 5) {
+    score += Math.min((punctuation_score - 5) / 30, 1.0) * 0.20;
+  }
+
+  return Math.min(score, 1.0);
+}
+
+/**
  * Generate rich insights based on the analysis results.
  */
-function generateInsights(t_label, t_conf, h_label, h_conf, clickbait_score, punctuation_score, uppercase_ratio, wordCount) {
+function generateInsights(t_label, t_conf, h_label, h_conf, clickbait_score, punctuation_score, uppercase_ratio, wordCount, final_label) {
   const insights = [];
 
   // Model agreement insight
@@ -51,9 +74,11 @@ function generateInsights(t_label, t_conf, h_label, h_conf, clickbait_score, pun
     insights.push(`Low clickbait score (${clickbait_score}%) — writing style appears measured and professional.`);
   }
 
-  // Text length analysis
-  if (wordCount < 15) {
-    insights.push(`Very short text (${wordCount} words) — insufficient content for reliable analysis. Longer articles produce more accurate results.`);
+  // Text length analysis — critical for understanding model reliability
+  if (wordCount < 10) {
+    insights.push(`Very short text (${wordCount} words) — ML models are unreliable on headlines this short. Linguistic analysis weighted heavily.`);
+  } else if (wordCount < 20) {
+    insights.push(`Short text (${wordCount} words) — limited content for ML models. Linguistic features have increased influence.`);
   } else if (wordCount < 50) {
     insights.push(`Moderate text length (${wordCount} words) — adequate for analysis but longer content yields higher accuracy.`);
   } else {
@@ -62,7 +87,9 @@ function generateInsights(t_label, t_conf, h_label, h_conf, clickbait_score, pun
 
   // Uppercase analysis
   if (uppercase_ratio > 30) {
-    insights.push(`Unusually high uppercase ratio (${uppercase_ratio}%) — excessive capitalization is common in misleading content.`);
+    insights.push(`Unusually high uppercase ratio (${uppercase_ratio}%) — excessive capitalization is common in misleading content and clickbait.`);
+  } else if (uppercase_ratio > 15) {
+    insights.push(`Elevated uppercase usage (${uppercase_ratio}%) — more capitalization than typical news articles.`);
   }
 
   // Punctuation analysis
@@ -74,7 +101,7 @@ function generateInsights(t_label, t_conf, h_label, h_conf, clickbait_score, pun
   const maxConf = Math.max(t_conf, h_conf);
   if (maxConf < 0.6) {
     insights.push(`Both models show low confidence — this content may contain mixed signals or be genuinely ambiguous.`);
-  } else if (maxConf > 0.9) {
+  } else if (maxConf > 0.9 && final_label !== "UNCERTAIN") {
     insights.push(`High model confidence (${(maxConf * 100).toFixed(0)}%) — strong signal detected in the content patterns.`);
   }
 
@@ -84,11 +111,15 @@ function generateInsights(t_label, t_conf, h_label, h_conf, clickbait_score, pun
 /**
  * Core decision function — determines the final FAKE/REAL/UNCERTAIN verdict.
  * 
- * Logic:
- * 1. If both models agree → use that label, confidence = weighted average
- * 2. If they disagree → weighted vote (transformer 60%, LR 40%)
- * 3. Clickbait and linguistic features act as confidence MODIFIERS, not overrides
- * 4. Very short text (< 15 words) or very low confidence → UNCERTAIN
+ * The key insight: ML models trained on full articles are UNRELIABLE on short
+ * headlines (< 15 words). For short text, linguistic features (clickbait,
+ * uppercase, punctuation) carry much more weight.
+ * 
+ * Logic flow:
+ * 1. Compute linguistic fake score from writing style
+ * 2. Determine how much to trust ML models vs linguistics (based on text length)
+ * 3. Compute weighted final score
+ * 4. Apply final threshold checks
  */
 export function getEnhancedDecision(t_label, t_conf, h_label, h_conf, clickbait_score, punctuation_score, uppercase_ratio, wordCount = 50) {
   let final_label = "UNCERTAIN";
@@ -97,83 +128,91 @@ export function getEnhancedDecision(t_label, t_conf, h_label, h_conf, clickbait_
 
   const agreement = calculateAgreement(t_conf, h_conf, t_label, h_label);
 
-  // ---- STEP 1: Primary decision from ML models ----
+  // ---- STEP 1: Compute linguistic fake score ----
+  const linguisticFakeScore = computeLinguisticFakeScore(clickbait_score, punctuation_score, uppercase_ratio);
 
-  if (t_label === h_label) {
-    // Both models agree — this is the strongest signal
-    final_label = t_label;
-    confidence = (TRANSFORMER_WEIGHT * t_conf) + (LR_WEIGHT * h_conf);
-    reason = `Both models agree: content is ${t_label}.`;
+  // ---- STEP 2: Determine trust weights based on text length ----
+  // Short text → trust linguistics more, models less
+  // Long text → trust models more, linguistics less
+  let modelTrust, linguisticTrust;
+
+  if (wordCount < 10) {
+    // Ultra-short: headlines, tweets — models are very unreliable
+    modelTrust = 0.30;
+    linguisticTrust = 0.70;
+  } else if (wordCount < 20) {
+    // Short: brief headlines
+    modelTrust = 0.50;
+    linguisticTrust = 0.50;
+  } else if (wordCount < 50) {
+    // Medium: paragraphs
+    modelTrust = 0.75;
+    linguisticTrust = 0.25;
+  } else {
+    // Long: full articles — models are most reliable
+    modelTrust = 0.85;
+    linguisticTrust = 0.15;
+  }
+
+  // ---- STEP 3: Compute ML model fake score ----
+  // Higher = more evidence for FAKE from ML models
+  const t_fake_score = t_label === "FAKE" ? t_conf : (1 - t_conf);
+  const h_fake_score = h_label === "FAKE" ? h_conf : (1 - h_conf);
+  const mlFakeScore = (TRANSFORMER_WEIGHT * t_fake_score) + (LR_WEIGHT * h_fake_score);
+
+  // ---- STEP 4: Weighted final fake score ----
+  const finalFakeScore = (modelTrust * mlFakeScore) + (linguisticTrust * linguisticFakeScore);
+
+  // ---- STEP 5: Determine verdict ----
+  if (finalFakeScore > 0.55) {
+    final_label = "FAKE";
+    confidence = finalFakeScore;
+
+    // Build reason
+    if (linguisticFakeScore > 0.4 && mlFakeScore < 0.5) {
+      reason = `Linguistic analysis overrides uncertain ML models — strong clickbait/sensationalist patterns detected (${clickbait_score}% clickbait score).`;
+    } else if (t_label === "FAKE" && h_label === "FAKE") {
+      reason = `Both models agree on FAKE.`;
+    } else if (t_label === h_label) {
+      reason = `ML models and linguistic analysis combine to indicate FAKE.`;
+    } else {
+      reason = `Weighted analysis leans FAKE — combined model and linguistic evidence (${(finalFakeScore * 100).toFixed(0)}%).`;
+    }
+
+  } else if (finalFakeScore < 0.40) {
+    final_label = "REAL";
+    confidence = 1 - finalFakeScore;
+
+    if (t_label === "REAL" && h_label === "REAL") {
+      reason = `Both models agree on REAL.`;
+    } else {
+      reason = `Weighted analysis indicates REAL — combined evidence score ${((1 - finalFakeScore) * 100).toFixed(0)}%.`;
+    }
+
+    // Additional check: if clickbait is high, add a warning
+    if (clickbait_score > 40) {
+      reason += ` Note: some clickbait patterns detected but not enough to override model predictions.`;
+    }
 
   } else {
-    // Models disagree — use weighted voting
-    // Calculate weighted "FAKE score": how much evidence points to FAKE
-    const t_fake_score = t_label === "FAKE" ? t_conf : (1 - t_conf);
-    const h_fake_score = h_label === "FAKE" ? h_conf : (1 - h_conf);
-    const weighted_fake = (TRANSFORMER_WEIGHT * t_fake_score) + (LR_WEIGHT * h_fake_score);
-
-    if (weighted_fake > 0.55) {
-      final_label = "FAKE";
-      confidence = weighted_fake;
-      reason = `Weighted model analysis leans toward FAKE (${(weighted_fake * 100).toFixed(0)}% weighted evidence).`;
-    } else if (weighted_fake < 0.45) {
-      final_label = "REAL";
-      confidence = 1 - weighted_fake;
-      reason = `Weighted model analysis leans toward REAL (${((1 - weighted_fake) * 100).toFixed(0)}% weighted evidence).`;
-    } else {
-      // Very close call — models truly disagree
-      final_label = "UNCERTAIN";
-      confidence = 0.5;
-      reason = `Models disagree and weighted evidence is nearly balanced (${(weighted_fake * 100).toFixed(0)}% fake vs ${((1 - weighted_fake) * 100).toFixed(0)}% real).`;
-    }
-  }
-
-  // ---- STEP 2: Linguistic feature modifiers ----
-  // These adjust confidence but DON'T flip the verdict on their own
-
-  let confidenceModifier = 0;
-
-  if (clickbait_score > 60) {
-    if (final_label === "REAL") {
-      // High clickbait + REAL verdict → reduce confidence
-      confidenceModifier -= 0.08;
-      reason += " Note: high clickbait indicators detected, reducing confidence.";
-    } else if (final_label === "FAKE") {
-      // High clickbait + FAKE verdict → reinforces the FAKE signal
-      confidenceModifier += 0.03;
-    }
-  }
-
-  if (uppercase_ratio > 30) {
-    if (final_label === "REAL") {
-      confidenceModifier -= 0.05;
-    }
-  }
-
-  // ---- STEP 3: Text length penalty ----
-  if (wordCount < 10) {
-    confidenceModifier -= 0.10;
-    if (confidence + confidenceModifier < 0.55 && final_label !== "UNCERTAIN") {
-      reason += " Very short text reduces analysis reliability.";
-    }
-  } else if (wordCount < 20) {
-    confidenceModifier -= 0.05;
-  }
-
-  // Apply modifier
-  confidence = Math.max(0.1, Math.min(0.99, confidence + confidenceModifier));
-
-  // ---- STEP 4: Final uncertainty check ----
-  if (confidence < 0.52 && final_label !== "UNCERTAIN") {
+    // Between 0.40 and 0.55 — genuinely uncertain
     final_label = "UNCERTAIN";
-    reason = "Confidence too low for a definitive verdict. " + reason;
+    confidence = 0.5;
+    reason = `Analysis is inconclusive — combined fake evidence is ${(finalFakeScore * 100).toFixed(0)}%, which is in the uncertain zone.`;
+
+    if (t_label !== h_label) {
+      reason += ` Models also disagree (Transformer: ${t_label}, LR: ${h_label}).`;
+    }
   }
+
+  // ---- STEP 6: Final confidence bounds ----
+  confidence = Math.max(0.1, Math.min(0.99, confidence));
 
   // Generate detailed insights
   const insights = generateInsights(
     t_label, t_conf, h_label, h_conf,
     clickbait_score, punctuation_score, uppercase_ratio,
-    wordCount
+    wordCount, final_label
   );
 
   return {
@@ -190,14 +229,13 @@ export function getEnhancedDecision(t_label, t_conf, h_label, h_conf, clickbait_
  * Considers model confidence, agreement, and text length.
  */
 export function calculateRobustness(t_conf, h_conf, agreement, wordCount) {
-  // Base: average model confidence scaled to 10
   let baseScore = ((t_conf + h_conf) / 2) * 10;
 
   // Agreement bonus/penalty
   if (agreement < 50) baseScore -= 1.5;
   else if (agreement > 80) baseScore += 0.5;
 
-  // Word count factor
+  // Word count factor — short text = less robust
   if (wordCount < 10) baseScore -= 2.5;
   else if (wordCount < 20) baseScore -= 1.5;
   else if (wordCount < 50) baseScore -= 0.5;
