@@ -137,9 +137,9 @@ export function getEnhancedDecision(t_label, t_conf, h_label, h_conf, clickbait_
   let modelTrust, linguisticTrust;
 
   if (wordCount < 10) {
-    // Ultra-short: headlines, tweets — models are very unreliable
-    modelTrust = 0.30;
-    linguisticTrust = 0.70;
+    // Ultra-short: headlines, tweets — models trained on articles are unreliable here
+    modelTrust = 0.15;
+    linguisticTrust = 0.85;
   } else if (wordCount < 20) {
     // Short: brief headlines
     modelTrust = 0.50;
