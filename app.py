@@ -415,9 +415,9 @@ def search_gnews(query, max_results=10):
     if not GNEWS_API_KEY:
         raise Exception("GNEWS_API_KEY is not configured")
 
-    # Clean query for search — remove excessive punctuation and caps
-    clean_query = re.sub(r'[!?]{2,}', '', query)
-    clean_query = clean_query.strip()[:200]  # GNews query length limit
+    # Clean query for search — remove all punctuation that breaks GNews API syntax
+    clean_query = re.sub(r'[^\w\s]', '', query)
+    clean_query = re.sub(r'\s+', ' ', clean_query).strip()[:200]  # GNews query length limit
 
     url = "https://gnews.io/api/v4/search"
     params = {
