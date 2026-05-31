@@ -32,10 +32,14 @@ const DemoSection = () => {
 
       const apiData = await response.json();
       
+      if (apiData.error) {
+        throw new Error(apiData.error);
+      }
+
       const words = input.trim().split(/\s+/);
       const wordCount = words.length;
 
-      // Extract from the Real API
+      // Extract from the API response
       const t_conf = apiData.transformer.confidence;
       const t_label = apiData.transformer.label;
       const h_conf = apiData.hybrid.confidence;
@@ -43,34 +47,36 @@ const DemoSection = () => {
       const rawFeatures = apiData.raw_features || {};
 
       const computedFeatures = {
-        clickbait: rawFeatures.clickbait || 0.24,
+        clickbait: rawFeatures.clickbait || 0,
         uppercase: rawFeatures.uppercase || 0,
         punctuation: rawFeatures.punctuation || 0,
         complexity: rawFeatures.complexity || 5
       };
 
-      // 2. Enhanced Verdict Logic
-      // Assuming clickbait is provided mostly as 0-1, so * 100 for score calculation
+      // Scale features for decision logic
       const clickbaitScore = Math.round(computedFeatures.clickbait * 100);
-      const uppercaseScore = computedFeatures.uppercase * 100;
-      const pctScore = computedFeatures.punctuation * 100;
+      const uppercaseScore = Math.round(computedFeatures.uppercase * 100);
+      const pctScore = Math.round(computedFeatures.punctuation * 100);
 
+      // Get enhanced decision with rich insights
       const decision = getEnhancedDecision(
         t_label, t_conf,
         h_label, h_conf,
-        clickbaitScore, pctScore, uppercaseScore
+        clickbaitScore, pctScore, uppercaseScore,
+        wordCount
       );
       
-      let finalVerdictLabel = decision.final_label;
-      const agreementRaw = decision.agreement / 100; // Unpack percentage logic to old raw usage for calculateRobustness
+      const finalVerdictLabel = decision.final_label;
+      const agreementScore = decision.agreement;
       
-      // 3. Dynamic Explanations (wrap the new reason into the explanations array to fulfill legacy props)
-      const explanations = [decision.reason];
+      // Use the rich insights from the decision logic
+      const explanations = decision.insights || [decision.reason];
 
       const dashboardData = {
         transformer: { 
           label: t_label, 
-          confidence: t_conf * 100 // mapped to percentages for UI display
+          confidence: t_conf * 100,
+          source: apiData.transformer.source || 'local'
         },
         hybrid: { 
           label: h_label, 
@@ -79,26 +85,26 @@ const DemoSection = () => {
         stats: {
           wordCount: wordCount,
           avgWordLength: (input.length / Math.max(1, wordCount)).toFixed(1),
-          upperRatio: Math.round(computedFeatures.uppercase * 100),
-          punctDensity: Math.round(computedFeatures.punctuation * 100)
+          upperRatio: uppercaseScore,
+          punctDensity: pctScore
         },
         features: {
-          punctuation: Math.round(computedFeatures.punctuation * 100), // scale to 100 for UI bar
-          uppercase: Math.round(computedFeatures.uppercase * 100),
-          complexity: computedFeatures.complexity, // remains 0-10
-          clickbait: Math.round(computedFeatures.clickbait * 100)
+          punctuation: pctScore,
+          uppercase: uppercaseScore,
+          complexity: computedFeatures.complexity,
+          clickbait: clickbaitScore
         },
-        agreementScore: Math.round(agreementRaw * 100),
-        robustnessScore: calculateRobustness(t_conf, h_conf, agreementRaw, wordCount),
+        agreementScore: agreementScore,
+        robustnessScore: calculateRobustness(t_conf, h_conf, agreementScore / 100, wordCount),
         finalVerdictLabel: finalVerdictLabel,
-        verdictExplanation: explanations.length > 0 ? explanations[0] : "Analysis complete.",
+        verdictExplanation: decision.reason,
         explanations: explanations
       };
       
       setResult(dashboardData);
     } catch (err) {
       console.error(err);
-      alert("Failed to connect to the backend API.");
+      alert("Failed to connect to the backend API. Make sure the server is running.");
     } finally {
       setLoading(false);
     }
