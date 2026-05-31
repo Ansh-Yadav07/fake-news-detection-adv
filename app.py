@@ -5,6 +5,8 @@ import re
 import joblib
 import requests
 import time
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity as sklearn_cosine_similarity
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import nltk
@@ -27,6 +29,7 @@ except Exception as e:
 
 # ---- Constants & API Config ----
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
+GNEWS_API_KEY = os.environ.get("GNEWS_API_KEY", "")
 HF_MODEL_ID = "anshy047/fake-news-detector-transformer"
 
 # Local model paths
@@ -42,6 +45,13 @@ CLICKBAIT_TRIGGERS = [
     "amazing", "must see", "gone wrong", "what happens next",
     "doctors hate", "one weird trick", "this changes everything",
     "you need to see", "never before seen", "finally revealed"
+]
+
+# ---- Trusted News Sources ----
+TRUSTED_SOURCES = [
+    "reuters", "ap news", "bbc", "the hindu",
+    "indian express", "times of india", "hindustan times", "ndtv",
+    "associated press", "bbc news"
 ]
 
 # ---- Load Models ----
@@ -371,6 +381,267 @@ def predict():
         traceback.print_exc()
         print("Prediction Error:", str(e))
         return jsonify({"error": str(e)}), 500
+
+
+# ---- News Verification Functions ----
+
+def extract_main_claim(text):
+    """
+    Extract the main claim/headline from the input text.
+    Short text (<30 words) is used directly.
+    Longer text: extract the first sentence as the search query.
+    """
+    words = text.split()
+    if len(words) < 30:
+        return text.strip()
+
+    # Try to extract first sentence
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    if sentences:
+        first_sentence = sentences[0].strip()
+        # If first sentence is reasonable length, use it
+        if 5 <= len(first_sentence.split()) <= 50:
+            return first_sentence
+
+    # Fallback: use first 25 words
+    return ' '.join(words[:25])
+
+
+def search_gnews(query, max_results=10):
+    """
+    Search GNews API for articles matching the query.
+    Returns a list of article dicts with title, description, source, url, publishedAt.
+    """
+    if not GNEWS_API_KEY:
+        raise Exception("GNEWS_API_KEY is not configured")
+
+    # Clean query for search — remove excessive punctuation and caps
+    clean_query = re.sub(r'[!?]{2,}', '', query)
+    clean_query = clean_query.strip()[:200]  # GNews query length limit
+
+    url = "https://gnews.io/api/v4/search"
+    params = {
+        "q": clean_query,
+        "lang": "en",
+        "max": max_results,
+        "apikey": GNEWS_API_KEY
+    }
+
+    try:
+        response = requests.get(url, params=params, timeout=15)
+        if response.status_code == 200:
+            data = response.json()
+            articles = data.get("articles", [])
+            return [{
+                "title": a.get("title", ""),
+                "description": a.get("description", ""),
+                "source": a.get("source", {}).get("name", "Unknown"),
+                "url": a.get("url", ""),
+                "published_at": a.get("publishedAt", "")
+            } for a in articles]
+        elif response.status_code == 403:
+            raise Exception("GNews API key is invalid or quota exceeded")
+        elif response.status_code == 429:
+            raise Exception("GNews API rate limit exceeded")
+        else:
+            raise Exception(f"GNews API error {response.status_code}: {response.text[:200]}")
+    except requests.exceptions.Timeout:
+        raise Exception("GNews API request timed out")
+    except requests.exceptions.ConnectionError:
+        raise Exception("Could not connect to GNews API")
+
+
+def compute_article_similarity(user_text, articles):
+    """
+    Compute TF-IDF cosine similarity between user text and each article.
+    Returns list of similarity scores (0-100) for each article.
+    """
+    if not articles:
+        return []
+
+    # Build corpus: user text + each article's title+description
+    corpus = [user_text]
+    for article in articles:
+        article_text = f"{article['title']} {article.get('description', '')}".strip()
+        corpus.append(article_text)
+
+    try:
+        vectorizer = TfidfVectorizer(
+            stop_words='english',
+            max_features=5000,
+            ngram_range=(1, 2)
+        )
+        tfidf_matrix = vectorizer.fit_transform(corpus)
+
+        # Compute cosine similarity between user text (index 0) and each article
+        user_vector = tfidf_matrix[0:1]
+        article_vectors = tfidf_matrix[1:]
+        similarities = sklearn_cosine_similarity(user_vector, article_vectors)[0]
+
+        # Convert to 0-100 scale
+        return [round(float(s) * 100, 1) for s in similarities]
+    except Exception as e:
+        print(f"Similarity computation error: {e}")
+        return [0.0] * len(articles)
+
+
+def is_trusted_source(source_name):
+    """Check if a source name matches any trusted source."""
+    source_lower = source_name.lower().strip()
+    return any(trusted in source_lower or source_lower in trusted for trusted in TRUSTED_SOURCES)
+
+
+def analyze_verification_results(user_text, articles, similarity_scores):
+    """
+    Analyze verification results to determine status and generate insights.
+    Returns verification_score, trusted_source_count, status, and insights.
+    """
+    if not articles or not similarity_scores:
+        return {
+            "verification_score": 0,
+            "supporting_articles": 0,
+            "trusted_source_count": 0,
+            "status": "UNVERIFIED",
+            "message": "No sufficient online evidence available.",
+            "insights": ["No supporting articles found online for this claim."]
+        }
+
+    # Count supporting articles (similarity > 20%)
+    supporting_threshold = 20
+    supporting = [(articles[i], similarity_scores[i])
+                  for i in range(len(articles))
+                  if similarity_scores[i] > supporting_threshold]
+
+    supporting_count = len(supporting)
+
+    # Count trusted sources among supporting articles
+    trusted_supporting = [(a, s) for a, s in supporting if is_trusted_source(a['source'])]
+    trusted_count = len(trusted_supporting)
+
+    # Calculate verification score (weighted average of top similarities)
+    if similarity_scores:
+        # Weight top scores more heavily
+        sorted_scores = sorted(similarity_scores, reverse=True)
+        top_scores = sorted_scores[:5]  # Top 5
+        verification_score = round(sum(top_scores) / len(top_scores), 1) if top_scores else 0
+    else:
+        verification_score = 0
+
+    # Determine status
+    if supporting_count == 0:
+        status = "UNVERIFIED"
+        message = "No sufficient online evidence available."
+    elif verification_score > 80 and trusted_count >= 3:
+        status = "VERIFIED"
+        message = "Multiple trusted news organizations independently confirm this claim."
+    elif verification_score > 60 and trusted_count >= 1:
+        status = "LIKELY SUPPORTED"
+        message = "Evidence from trusted sources partially supports this claim."
+    elif verification_score > 40 and supporting_count >= 3:
+        status = "PARTIALLY SUPPORTED"
+        message = "Some online sources report similar content."
+    else:
+        status = "UNVERIFIED"
+        message = "Insufficient evidence from trusted sources to verify this claim."
+
+    # Generate insights
+    insights = []
+    insights.append(f"{supporting_count} supporting article{'s' if supporting_count != 1 else ''} found online.")
+
+    # Add top trusted source matches
+    for article, score in sorted(trusted_supporting, key=lambda x: x[1], reverse=True)[:4]:
+        insights.append(f"{article['source']} reports a highly similar story ({score}%).")
+
+    if trusted_count > 0:
+        insights.append(f"{trusted_count} trusted source{'s' if trusted_count != 1 else ''} independently support{'s' if trusted_count == 1 else ''} the claim.")
+
+    insights.append(f"Online verification confidence: {verification_score}%.")
+
+    if status == "VERIFIED":
+        insights.append("Real-world evidence strongly supports this article.")
+    elif status == "UNVERIFIED" and supporting_count == 0:
+        insights.append("This does not automatically mean the article is fake — it may be too new or niche for online coverage.")
+
+    return {
+        "verification_score": verification_score,
+        "supporting_articles": supporting_count,
+        "trusted_source_count": trusted_count,
+        "status": status,
+        "message": message,
+        "insights": insights
+    }
+
+
+@app.route('/verify', methods=['POST'])
+def verify():
+    """Verify submitted text against online news sources using GNews API."""
+    data = request.get_json()
+    if not data or 'text' not in data:
+        return jsonify({"error": "No text provided"}), 400
+
+    text = data['text']
+    if len(text.strip()) == 0:
+        return jsonify({"error": "Empty text provided"}), 400
+
+    try:
+        # Step 1: Extract main claim
+        claim = extract_main_claim(text)
+        print(f"Verification: Searching for claim: '{claim[:80]}...'")
+
+        # Step 2: Search GNews
+        articles = search_gnews(claim)
+        print(f"Verification: Found {len(articles)} articles")
+
+        # Step 3: Compute similarity
+        similarity_scores = compute_article_similarity(text, articles)
+
+        # Step 4: Analyze results
+        analysis = analyze_verification_results(text, articles, similarity_scores)
+
+        # Build enriched article list with similarity scores
+        enriched_articles = []
+        for i, article in enumerate(articles):
+            score = similarity_scores[i] if i < len(similarity_scores) else 0
+            enriched_articles.append({
+                "title": article["title"],
+                "source": article["source"],
+                "url": article["url"],
+                "similarity": score,
+                "is_trusted": is_trusted_source(article["source"]),
+                "published_at": article["published_at"]
+            })
+
+        # Sort by similarity descending
+        enriched_articles.sort(key=lambda x: x["similarity"], reverse=True)
+
+        payload = {
+            "verification_score": analysis["verification_score"],
+            "supporting_articles": analysis["supporting_articles"],
+            "trusted_source_count": analysis["trusted_source_count"],
+            "status": analysis["status"],
+            "message": analysis["message"],
+            "articles": enriched_articles,
+            "insights": analysis["insights"],
+            "claim_searched": claim
+        }
+
+        return jsonify(payload)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"Verification Error: {str(e)}")
+        return jsonify({
+            "error": str(e),
+            "verification_score": 0,
+            "supporting_articles": 0,
+            "trusted_source_count": 0,
+            "status": "UNVERIFIED",
+            "message": "Verification service unavailable.",
+            "articles": [],
+            "insights": ["Online verification could not be completed."],
+            "claim_searched": ""
+        }), 200  # Return 200 with error info so frontend can still show partial results
 
 
 if __name__ == '__main__':

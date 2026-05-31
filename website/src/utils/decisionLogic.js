@@ -1,6 +1,17 @@
 /**
  * Decision Logic for Fake News Detection
  * 
+ * === WITH VERIFICATION (new flow) ===
+ * Weights:
+ *   Online Verification = 50%
+ *   ML Models          = 20%
+ *   Source Credibility  = 15%
+ *   Linguistic Features = 10%
+ *   Clickbait Detection = 5%
+ * 
+ * Verdict Categories: VERIFIED, LIKELY REAL, UNVERIFIED, SUSPICIOUS, LIKELY FAKE
+ * 
+ * === WITHOUT VERIFICATION (legacy fallback) ===
  * Key principles:
  * - For LONG texts (50+ words): ML models are dominant, linguistics are minor modifiers
  * - For MEDIUM texts (15-50 words): Balanced between models and linguistics
@@ -13,6 +24,15 @@
 
 const TRANSFORMER_WEIGHT = 0.60;
 const LR_WEIGHT = 0.40;
+
+// Verification-aware weights
+const WEIGHTS = {
+  ONLINE_VERIFICATION: 0.50,
+  ML_MODELS: 0.20,
+  SOURCE_CREDIBILITY: 0.15,
+  LINGUISTIC_FEATURES: 0.10,
+  CLICKBAIT_DETECTION: 0.05
+};
 
 /**
  * Calculate weighted agreement between the two models.
@@ -52,7 +72,7 @@ function computeLinguisticFakeScore(clickbait_score, punctuation_score, uppercas
 }
 
 /**
- * Generate rich insights based on the analysis results.
+ * Generate rich insights based on the analysis results (legacy — without verification).
  */
 function generateInsights(t_label, t_conf, h_label, h_conf, clickbait_score, punctuation_score, uppercase_ratio, wordCount, final_label) {
   const insights = [];
@@ -109,7 +129,25 @@ function generateInsights(t_label, t_conf, h_label, h_conf, clickbait_score, pun
 }
 
 /**
+ * Generate enhanced insights that include verification findings.
+ */
+function generateInsightsWithVerification(t_label, t_conf, h_label, h_conf, clickbait_score, punctuation_score, uppercase_ratio, wordCount, final_label, verification) {
+  // Start with base ML/linguistic insights
+  const insights = generateInsights(t_label, t_conf, h_label, h_conf, clickbait_score, punctuation_score, uppercase_ratio, wordCount, final_label);
+
+  // Append verification-specific insights from the backend
+  if (verification && verification.insights) {
+    verification.insights.forEach(insight => {
+      insights.push(insight);
+    });
+  }
+
+  return insights;
+}
+
+/**
  * Core decision function — determines the final FAKE/REAL/UNCERTAIN verdict.
+ * LEGACY: Used when verification data is NOT available (fallback).
  * 
  * The key insight: ML models trained on full articles are UNRELIABLE on short
  * headlines (< 15 words). For short text, linguistic features (clickbait,
@@ -225,6 +263,153 @@ export function getEnhancedDecision(t_label, t_conf, h_label, h_conf, clickbait_
 }
 
 /**
+ * Enhanced decision function WITH online verification.
+ * 
+ * Uses a weighted scoring system where online verification is the strongest signal:
+ *   Online Verification = 50%
+ *   ML Models          = 20%
+ *   Source Credibility  = 15%
+ *   Linguistic Features = 10%
+ *   Clickbait Detection = 5%
+ *
+ * Verdict categories: VERIFIED, LIKELY REAL, UNVERIFIED, SUSPICIOUS, LIKELY FAKE
+ * 
+ * Override rules:
+ * - If verification_score > 80 AND trusted_sources >= 3 → verification is primary signal
+ * - If supporting_articles == 0 → UNVERIFIED (never auto-classify as fake)
+ * - If contradicting evidence → SUSPICIOUS
+ */
+export function getEnhancedDecisionWithVerification(
+  t_label, t_conf, h_label, h_conf,
+  clickbait_score, punctuation_score, uppercase_ratio,
+  wordCount, verification
+) {
+  const agreement = calculateAgreement(t_conf, h_conf, t_label, h_label);
+
+  // ---- Compute component scores (0-1 scale, higher = more evidence for REAL) ----
+
+  // 1. Online Verification score (0-1)
+  const verificationRealScore = (verification.verification_score || 0) / 100;
+
+  // 2. ML Model score (0-1, higher = more evidence for REAL)
+  const t_real_score = t_label === "REAL" ? t_conf : (1 - t_conf);
+  const h_real_score = h_label === "REAL" ? h_conf : (1 - h_conf);
+  const mlRealScore = (TRANSFORMER_WEIGHT * t_real_score) + (LR_WEIGHT * h_real_score);
+
+  // 3. Source Credibility score (0-1)
+  const trustedCount = verification.trusted_source_count || 0;
+  const supportingCount = verification.supporting_articles || 0;
+  const credibilityScore = Math.min(1.0, trustedCount / 4); // 4+ trusted sources = max
+
+  // 4. Linguistic "real" score (inverse of fake score, 0-1)
+  const linguisticFakeScore = computeLinguisticFakeScore(clickbait_score, punctuation_score, uppercase_ratio);
+  const linguisticRealScore = 1 - linguisticFakeScore;
+
+  // 5. Clickbait "real" score (inverse, 0-1)
+  const clickbaitRealScore = 1 - (clickbait_score / 100);
+
+  // ---- Compute weighted final score ----
+  const finalRealScore =
+    (WEIGHTS.ONLINE_VERIFICATION * verificationRealScore) +
+    (WEIGHTS.ML_MODELS * mlRealScore) +
+    (WEIGHTS.SOURCE_CREDIBILITY * credibilityScore) +
+    (WEIGHTS.LINGUISTIC_FEATURES * linguisticRealScore) +
+    (WEIGHTS.CLICKBAIT_DETECTION * clickbaitRealScore);
+
+  // ---- Apply override rules and determine verdict ----
+  let final_label = "UNVERIFIED";
+  let confidence = 0;
+  let reason = "";
+
+  const verificationStatus = verification.status || "UNVERIFIED";
+
+  // OVERRIDE RULE 1: Strong verification override
+  if (verificationRealScore > 0.80 && trustedCount >= 3) {
+    final_label = "VERIFIED";
+    confidence = Math.max(finalRealScore, 0.85);
+    reason = `Multiple trusted news organizations independently confirm this claim. Verification score: ${verification.verification_score}% with ${trustedCount} trusted sources.`;
+
+    // Even if clickbait is high, verified trumps it
+    if (clickbait_score > 50) {
+      reason += ` Note: clickbait patterns detected (${clickbait_score}%) but overridden by strong real-world evidence.`;
+    }
+  }
+  // OVERRIDE RULE 2: No evidence found — UNVERIFIED, never auto-fake
+  else if (supportingCount === 0) {
+    // Fall back to ML-only decision but label as UNVERIFIED
+    if (finalRealScore > 0.55) {
+      final_label = "UNVERIFIED";
+      confidence = finalRealScore;
+      reason = `No online evidence found. ML models suggest real content but cannot be verified online.`;
+    } else if (finalRealScore < 0.40) {
+      final_label = "LIKELY FAKE";
+      confidence = 1 - finalRealScore;
+      reason = `No online evidence found and ML analysis indicates suspicious content.`;
+    } else {
+      final_label = "UNVERIFIED";
+      confidence = 0.5;
+      reason = `No online evidence available. ML analysis is inconclusive.`;
+    }
+  }
+  // OVERRIDE RULE 3: Contradicting evidence
+  else if (verificationStatus === "SUSPICIOUS") {
+    final_label = "SUSPICIOUS";
+    confidence = 0.6;
+    reason = `Conflicting information detected from trusted sources. ${verification.message || ''}`;
+  }
+  // Normal weighted decision
+  else if (finalRealScore > 0.70) {
+    final_label = "VERIFIED";
+    confidence = finalRealScore;
+    reason = `Strong combined evidence supports this article. Verification score: ${verification.verification_score}%.`;
+  } else if (finalRealScore > 0.55) {
+    final_label = "LIKELY REAL";
+    confidence = finalRealScore;
+    reason = `Multiple signals suggest this article is likely real. ${supportingCount} supporting articles found online.`;
+    if (trustedCount > 0) {
+      reason += ` ${trustedCount} trusted source${trustedCount > 1 ? 's' : ''} found.`;
+    }
+  } else if (finalRealScore > 0.40) {
+    final_label = "UNVERIFIED";
+    confidence = 0.5;
+    reason = `Analysis is inconclusive — mixed signals from ML models and online verification.`;
+  } else if (finalRealScore > 0.25) {
+    final_label = "SUSPICIOUS";
+    confidence = 1 - finalRealScore;
+    reason = `Multiple signals raise concerns. Low verification score (${verification.verification_score}%) combined with ML analysis.`;
+  } else {
+    final_label = "LIKELY FAKE";
+    confidence = 1 - finalRealScore;
+    reason = `Strong evidence suggests this content is not reliable. Low online verification and ML models flag suspicious patterns.`;
+  }
+
+  // ---- Final confidence bounds ----
+  confidence = Math.max(0.1, Math.min(0.99, confidence));
+
+  // Generate insights including verification
+  const insights = generateInsightsWithVerification(
+    t_label, t_conf, h_label, h_conf,
+    clickbait_score, punctuation_score, uppercase_ratio,
+    wordCount, final_label, verification
+  );
+
+  return {
+    final_label,
+    confidence: parseFloat(confidence.toFixed(3)),
+    agreement,
+    reason,
+    insights,
+    weights: {
+      verification: Math.round(verificationRealScore * 100),
+      ml: Math.round(mlRealScore * 100),
+      credibility: Math.round(credibilityScore * 100),
+      linguistic: Math.round(linguisticRealScore * 100),
+      clickbait: Math.round(clickbaitRealScore * 100)
+    }
+  };
+}
+
+/**
  * Calculate analysis robustness score (0-10).
  * Considers model confidence, agreement, and text length.
  */
@@ -243,4 +428,23 @@ export function calculateRobustness(t_conf, h_conf, agreement, wordCount) {
 
   const finalScore = Math.max(0, Math.min(10, baseScore));
   return Number(finalScore.toFixed(1));
+}
+
+/**
+ * Calculate enhanced robustness that includes verification signal.
+ */
+export function calculateRobustnessWithVerification(t_conf, h_conf, agreement, wordCount, verification) {
+  let baseScore = calculateRobustness(t_conf, h_conf, agreement, wordCount);
+
+  if (verification) {
+    const verScore = (verification.verification_score || 0) / 100;
+    const trustedCount = verification.trusted_source_count || 0;
+
+    // Verification boost
+    if (verScore > 0.7 && trustedCount >= 2) baseScore += 2.0;
+    else if (verScore > 0.5) baseScore += 1.0;
+    else if (verScore < 0.2 && verification.supporting_articles === 0) baseScore -= 1.0;
+  }
+
+  return Number(Math.max(0, Math.min(10, baseScore)).toFixed(1));
 }

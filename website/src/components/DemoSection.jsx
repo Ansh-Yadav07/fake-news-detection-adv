@@ -1,40 +1,66 @@
 import React, { useState } from 'react';
-import { ArrowRight, Loader2, Sparkles } from 'lucide-react';
+import { ArrowRight, Loader2, Sparkles, Globe, Wifi, WifiOff } from 'lucide-react';
 import ChartSection from './analyzer/ChartSection';
 import StatsGrid from './analyzer/StatsGrid';
 import FeatureBars from './analyzer/FeatureBars';
 import VerdictPanel from './analyzer/VerdictPanel';
 import InsightsList from './analyzer/InsightsList';
-import { getEnhancedDecision, calculateRobustness } from '../utils/decisionLogic';
+import OnlineVerification from './analyzer/OnlineVerification';
+import { getEnhancedDecision, getEnhancedDecisionWithVerification, calculateRobustness, calculateRobustnessWithVerification } from '../utils/decisionLogic';
 
 const DemoSection = () => {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
+  const [loadingPhase, setLoadingPhase] = useState('');
 
   const handleAnalyze = async () => {
     if (!input.trim()) return;
     
     setLoading(true);
     setResult(null);
+    setLoadingPhase('Initializing analysis...');
 
     try {
-      const apiUrl = import.meta.env.VITE_API_URL || 'http://127.0.0.1:5001/predict';
-      const response = await fetch(apiUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: input.trim() })
-      });
+      const apiBase = (import.meta.env.VITE_API_URL || 'http://127.0.0.1:5001/predict').replace('/predict', '');
+      const textPayload = JSON.stringify({ text: input.trim() });
 
-      if (!response.ok) {
-        throw new Error(`API error: ${response.status}`);
-      }
-
-      const apiData = await response.json();
+      // Fire BOTH API calls in parallel for best performance
+      setLoadingPhase('Running ML models & verifying sources...');
       
-      if (apiData.error) {
-        throw new Error(apiData.error);
+      const [predictResult, verifyResult] = await Promise.allSettled([
+        fetch(`${apiBase}/predict`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: textPayload
+        }).then(async (res) => {
+          if (!res.ok) throw new Error(`API error: ${res.status}`);
+          const data = await res.json();
+          if (data.error) throw new Error(data.error);
+          return data;
+        }),
+        fetch(`${apiBase}/verify`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: textPayload
+        }).then(async (res) => {
+          if (!res.ok) throw new Error(`Verify API error: ${res.status}`);
+          return await res.json();
+        })
+      ]);
+
+      // ML prediction is required
+      if (predictResult.status === 'rejected') {
+        throw new Error(predictResult.reason?.message || 'Failed to connect to ML prediction API');
       }
+
+      const apiData = predictResult.value;
+
+      // Verification is optional — graceful fallback
+      const verificationData = verifyResult.status === 'fulfilled' ? verifyResult.value : null;
+      const verificationAvailable = verificationData && !verificationData.error;
+
+      setLoadingPhase('Computing verdict...');
 
       const words = input.trim().split(/\s+/);
       const wordCount = words.length;
@@ -58,13 +84,32 @@ const DemoSection = () => {
       const uppercaseScore = Math.round(computedFeatures.uppercase * 100);
       const pctScore = Math.round(computedFeatures.punctuation * 100);
 
-      // Get enhanced decision with rich insights
-      const decision = getEnhancedDecision(
-        t_label, t_conf,
-        h_label, h_conf,
-        clickbaitScore, pctScore, uppercaseScore,
-        wordCount
-      );
+      // Get decision — WITH or WITHOUT verification
+      let decision;
+      let robustnessScore;
+
+      if (verificationAvailable) {
+        decision = getEnhancedDecisionWithVerification(
+          t_label, t_conf,
+          h_label, h_conf,
+          clickbaitScore, pctScore, uppercaseScore,
+          wordCount,
+          verificationData
+        );
+        robustnessScore = calculateRobustnessWithVerification(
+          t_conf, h_conf, decision.agreement / 100, wordCount, verificationData
+        );
+      } else {
+        decision = getEnhancedDecision(
+          t_label, t_conf,
+          h_label, h_conf,
+          clickbaitScore, pctScore, uppercaseScore,
+          wordCount
+        );
+        robustnessScore = calculateRobustness(
+          t_conf, h_conf, decision.agreement / 100, wordCount
+        );
+      }
       
       const finalVerdictLabel = decision.final_label;
       const agreementScore = decision.agreement;
@@ -95,10 +140,13 @@ const DemoSection = () => {
           clickbait: clickbaitScore
         },
         agreementScore: agreementScore,
-        robustnessScore: calculateRobustness(t_conf, h_conf, agreementScore / 100, wordCount),
+        robustnessScore: robustnessScore,
         finalVerdictLabel: finalVerdictLabel,
         verdictExplanation: decision.reason,
-        explanations: explanations
+        explanations: explanations,
+        verification: verificationAvailable ? verificationData : null,
+        verificationWeights: decision.weights || null,
+        verificationFailed: !verificationAvailable
       };
       
       setResult(dashboardData);
@@ -107,6 +155,7 @@ const DemoSection = () => {
       alert("Failed to connect to the backend API. Make sure the server is running.");
     } finally {
       setLoading(false);
+      setLoadingPhase('');
     }
   };
 
@@ -121,7 +170,7 @@ const DemoSection = () => {
           Content Analysis Engine
         </h2>
         <p className="text-zinc-500 max-w-xl mx-auto text-sm md:text-base font-medium">
-          Paste your article or headline below. Our dual-model pipeline will process linguistic markers, analyze syntactic complexity, and establish a multi-layered truthfulness verdict.
+          Paste your article or headline below. Our dual-model pipeline will process linguistic markers, verify against trusted news sources, and establish a multi-layered truthfulness verdict.
         </p>
       </div>
 
@@ -144,7 +193,7 @@ const DemoSection = () => {
             {loading ? (
               <>
                 <Loader2 className="w-5 h-5 animate-spin" />
-                Processing Signal...
+                {loadingPhase || 'Processing Signal...'}
               </>
             ) : (
               <>
@@ -166,12 +215,22 @@ const DemoSection = () => {
             explanation={result.verdictExplanation}
             agreementScore={result.agreementScore}
             robustnessScore={result.robustnessScore}
+            verificationWeights={result.verificationWeights}
           />
 
-          <div className="grid md:grid-cols-3 gap-6">
+          {/* Verification status banner */}
+          {result.verificationFailed && (
+            <div className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-800">
+              <WifiOff className="w-4 h-4 flex-shrink-0" />
+              <span className="text-xs font-semibold">Online verification unavailable — verdict based on ML models and linguistic analysis only.</span>
+            </div>
+          )}
+
+          <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6">
             <ChartSection transformerConf={result.transformer.confidence} hybridConf={result.hybrid.confidence} />
             <FeatureBars {...result.features} />
             <StatsGrid {...result.stats} />
+            <OnlineVerification verification={result.verification} />
           </div>
 
           <div className="grid grid-cols-1">
