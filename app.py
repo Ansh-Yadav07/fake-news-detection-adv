@@ -34,6 +34,7 @@ HF_TOKEN = os.environ.get("HF_TOKEN", "")
 GNEWS_API_KEY = os.environ.get("GNEWS_API_KEY", "")
 NEWSDATA_API_KEY = os.environ.get("NEWSDATA_API_KEY", "")
 NEWSAPI_KEY = os.environ.get("NEWSAPI_KEY", "")
+SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "")
 HF_MODEL_ID = "anshy047/fake-news-detector-transformer"
 
 # Local model paths
@@ -778,14 +779,101 @@ def search_newsapi(query, max_results=10, timeout=2.0):
         return []
 
 
+def search_serpapi(query, max_results=10, timeout=3.0):
+    """
+    Search SerpAPI (Google News engine) for articles matching the query.
+    Used as a FALLBACK when primary sources return insufficient results.
+    Google News provides the most comprehensive real-time coverage.
+    
+    Returns a list of article dicts (same format as other search functions).
+    """
+    if not SERPAPI_KEY:
+        return []
+
+    clean_query = _clean_search_query(query)
+    url = "https://serpapi.com/search"
+    params = {
+        "engine": "google_news",
+        "q": clean_query,
+        "gl": "us",
+        "hl": "en",
+        "api_key": SERPAPI_KEY
+    }
+
+    try:
+        response = requests.get(url, params=params, timeout=timeout)
+        if response.status_code == 200:
+            data = response.json()
+            articles = []
+
+            # SerpAPI returns news_results as an array
+            news_results = data.get("news_results", [])
+            for item in news_results[:max_results]:
+                # Each item can have "stories" (cluster) or be a single article
+                if "stories" in item:
+                    # Clustered stories — extract individual articles
+                    for story in item["stories"][:3]:
+                        articles.append({
+                            "title": story.get("title", ""),
+                            "description": story.get("snippet", "") or "",
+                            "source": story.get("source", {}).get("name", "Unknown") if isinstance(story.get("source"), dict) else story.get("source", "Unknown"),
+                            "url": story.get("link", ""),
+                            "published_at": story.get("date", "")
+                        })
+                else:
+                    source = item.get("source", {})
+                    source_name = source.get("name", "Unknown") if isinstance(source, dict) else str(source)
+                    articles.append({
+                        "title": item.get("title", ""),
+                        "description": item.get("snippet", "") or "",
+                        "source": source_name,
+                        "url": item.get("link", ""),
+                        "published_at": item.get("date", "")
+                    })
+
+            print(f"[SerpAPI] Found {len(articles)} articles")
+            return articles
+        else:
+            print(f"SerpAPI error {response.status_code}")
+            return []
+    except Exception as e:
+        print(f"SerpAPI error: {e}")
+        return []
+
+
+def _deduplicate_articles(articles):
+    """Deduplicate articles by title similarity."""
+    seen_titles = set()
+    unique = []
+    for article in articles:
+        title = article.get('title', '')
+        if not title:
+            continue
+        title_key = title.lower().strip()[:60]
+        if title_key not in seen_titles:
+            seen_titles.add(title_key)
+            unique.append(article)
+    return unique
+
+
 def search_all_news_sources(query, max_results=10, timeout=2.0):
     """
-    Search ALL news APIs in parallel and combine results.
-    Returns a deduplicated list of articles from all sources.
+    Smart multi-source news search with SerpAPI fallback.
+    
+    Strategy:
+      1. Run GNews, NewsData.io, NewsAPI.org in PARALLEL (fast, 2s timeout)
+      2. If combined results < 3 articles → trigger SerpAPI fallback (Google News)
+      3. Deduplicate all articles by title
+    
+    SerpAPI is the fallback because:
+      - It's the most reliable (Google News under the hood)
+      - It has the best real-time coverage
+      - But it has limited free credits, so we conserve calls
     """
     all_articles = []
-    seen_titles = set()
+    sources_used = []
 
+    # ---- Phase 1: Primary sources in parallel ----
     with ThreadPoolExecutor(max_workers=3) as executor:
         futures = {
             'gnews': executor.submit(search_gnews, query, max_results, timeout),
@@ -796,16 +884,30 @@ def search_all_news_sources(query, max_results=10, timeout=2.0):
         for source_name, future in futures.items():
             try:
                 articles = future.result(timeout=timeout + 1)
-                for article in articles:
-                    # Deduplicate by title similarity
-                    title_key = article['title'].lower().strip()[:60]
-                    if title_key not in seen_titles:
-                        seen_titles.add(title_key)
-                        all_articles.append(article)
+                if articles:
+                    sources_used.append(source_name)
+                    all_articles.extend(articles)
             except Exception as e:
                 print(f"[News] {source_name} failed: {e}")
 
-    print(f"[News] Combined: {len(all_articles)} articles from {len(futures)} sources")
+    # Deduplicate after phase 1
+    all_articles = _deduplicate_articles(all_articles)
+    print(f"[News] Phase 1: {len(all_articles)} articles from {sources_used}")
+
+    # ---- Phase 2: SerpAPI fallback if results are insufficient ----
+    if len(all_articles) < 3 and SERPAPI_KEY:
+        print(f"[News] Phase 1 returned only {len(all_articles)} articles — triggering SerpAPI fallback")
+        try:
+            serp_articles = search_serpapi(query, max_results=max_results, timeout=3.0)
+            if serp_articles:
+                sources_used.append('serpapi')
+                all_articles.extend(serp_articles)
+                all_articles = _deduplicate_articles(all_articles)
+                print(f"[News] Phase 2: SerpAPI added {len(serp_articles)} articles, total now {len(all_articles)}")
+        except Exception as e:
+            print(f"[News] SerpAPI fallback failed: {e}")
+
+    print(f"[News] Final: {len(all_articles)} articles from {sources_used}")
     return all_articles
 
 
