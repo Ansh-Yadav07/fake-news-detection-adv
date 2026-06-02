@@ -32,6 +32,8 @@ except Exception as e:
 # ---- Constants & API Config ----
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 GNEWS_API_KEY = os.environ.get("GNEWS_API_KEY", "")
+NEWSDATA_API_KEY = os.environ.get("NEWSDATA_API_KEY", "")
+NEWSAPI_KEY = os.environ.get("NEWSAPI_KEY", "")
 HF_MODEL_ID = "anshy047/fake-news-detector-transformer"
 
 # Local model paths
@@ -402,10 +404,68 @@ def _wikipedia_search_fallback(query, timeout=1.5):
         return None
 
 
+def _detect_contradiction(user_text, wiki_description, wiki_extract, wiki_title):
+    """
+    Detect if the user's claim CONTRADICTS Wikipedia information.
+    Handles cases like:
+      - "Lucknow is capital of India" vs Wikipedia: "Capital of Uttar Pradesh, India"
+      - "Earth is flat" vs Wikipedia: "third planet from the Sun"
+    
+    Returns (is_contradicted: bool, contradiction_detail: str)
+    """
+    user_lower = user_text.lower().strip()
+    desc_lower = (wiki_description or "").lower()
+    extract_lower = (wiki_extract or "").lower()
+    wiki_full = f"{desc_lower} {extract_lower}"
+
+    # Pattern 1: "X is capital of Y" claims
+    capital_match = re.search(r'(?:is|the)\s+(?:the\s+)?capital\s+of\s+([\w\s]+)', user_lower)
+    if capital_match:
+        user_claims_capital_of = capital_match.group(1).strip().rstrip('.')
+        # Check what Wikipedia says the capital is of
+        wiki_capital_match = re.search(r'capital\s+(?:of|city\s+of)\s+([\w\s,]+?)(?:\.|$|,)', desc_lower)
+        if not wiki_capital_match:
+            wiki_capital_match = re.search(r'capital\s+(?:of|city\s+of)\s+([\w\s,]+?)(?:\.|$|,)', extract_lower)
+        
+        if wiki_capital_match:
+            wiki_says_capital_of = wiki_capital_match.group(1).strip().rstrip('.')
+            # Compare: does user claim match what Wikipedia says?
+            user_claim_words = set(user_claims_capital_of.lower().split())
+            wiki_claim_words = set(wiki_says_capital_of.lower().split())
+            # If wiki says "uttar pradesh" but user says "india", that's a contradiction
+            if not user_claim_words.issubset(wiki_claim_words) and not wiki_claim_words.issubset(user_claim_words):
+                return True, f"User claims capital of '{user_claims_capital_of}' but Wikipedia says capital of '{wiki_says_capital_of}'"
+
+    # Pattern 2: "X is Y" simple factual claims — check if Wikipedia description contradicts
+    is_match = re.match(r'^(.+?)\s+is\s+(.+?)$', user_lower.rstrip('.'))
+    if is_match and desc_lower:
+        subject = is_match.group(1).strip()
+        user_predicate = is_match.group(2).strip()
+        # Check for direct numerical/factual contradictions
+        # e.g., user says "population is 500 million" but wiki says "population of 1.4 billion"
+        user_numbers = re.findall(r'\d+', user_predicate)
+        wiki_numbers = re.findall(r'\d+', desc_lower)
+        if user_numbers and wiki_numbers:
+            # If they have numbers that are very different, flag potential contradiction
+            pass  # Too complex for simple check, skip for now
+
+    # Pattern 3: Flat Earth / well-known false claims
+    flat_earth_patterns = [
+        (r'earth\s+is\s+flat', 'Wikipedia describes Earth as a planet, not flat'),
+        (r'sun\s+revolves?\s+around\s+(?:the\s+)?earth', 'Wikipedia states Earth orbits the Sun'),
+        (r'moon\s+landing\s+(?:was|is)\s+(?:fake|hoax|faked)', 'Wikipedia documents the Apollo moon landings as real'),
+    ]
+    for pattern, detail in flat_earth_patterns:
+        if re.search(pattern, user_lower):
+            return True, detail
+
+    return False, ""
+
+
 def verify_against_wikipedia(user_text, wiki_data):
     """
-    Compare user's claim against Wikipedia data using TF-IDF cosine similarity.
-    Also checks if key terms from the claim appear in the Wikipedia extract.
+    Compare user's claim against Wikipedia data.
+    Uses TF-IDF similarity, term overlap, AND contradiction detection.
     
     Returns verification result dict.
     """
@@ -422,6 +482,7 @@ def verify_against_wikipedia(user_text, wiki_data):
 
     extract = wiki_data.get("extract", "")
     description = wiki_data.get("description", "")
+    wiki_title = wiki_data.get("title", "")
     wiki_text = f"{description} {extract}"
 
     if not wiki_text.strip():
@@ -430,12 +491,35 @@ def verify_against_wikipedia(user_text, wiki_data):
             "status": "NOT FOUND",
             "message": "Wikipedia article has no content.",
             "insights": ["Wikipedia article found but contains no useful extract."],
-            "wiki_title": wiki_data.get("title", ""),
+            "wiki_title": wiki_title,
             "wiki_url": wiki_data.get("url", ""),
             "wiki_extract": ""
         }
 
-    # Method 1: TF-IDF cosine similarity
+    # ---- Step 0: Contradiction Detection ----
+    is_contradicted, contradiction_detail = _detect_contradiction(
+        user_text, description, extract, wiki_title
+    )
+
+    if is_contradicted:
+        return {
+            "verification_score": 5,
+            "status": "CONTRADICTED",
+            "message": f"Wikipedia CONTRADICTS this claim. {contradiction_detail}.",
+            "insights": [
+                f"⚠️ Wikipedia contradicts this statement.",
+                f"{contradiction_detail}.",
+                f"Wikipedia describes \"{wiki_title}\" as: {description}." if description else "",
+            ],
+            "wiki_title": wiki_title,
+            "wiki_url": wiki_data.get("url", ""),
+            "wiki_extract": extract[:300] if extract else "",
+            "tfidf_score": 0,
+            "term_overlap_score": 0,
+            "is_contradicted": True
+        }
+
+    # ---- Step 1: TF-IDF cosine similarity ----
     try:
         vectorizer = TfidfVectorizer(
             stop_words='english',
@@ -448,7 +532,7 @@ def verify_against_wikipedia(user_text, wiki_data):
     except Exception:
         tfidf_score = 0
 
-    # Method 2: Key term overlap — check if important words from claim appear in Wikipedia
+    # ---- Step 2: Key term overlap ----
     user_words = set(w.lower() for w in re.sub(r'[^\w\s]', '', user_text).split()
                      if w.lower() not in stop_words and len(w) > 2)
     wiki_words = set(w.lower() for w in re.sub(r'[^\w\s]', '', wiki_text).split()
@@ -461,22 +545,43 @@ def verify_against_wikipedia(user_text, wiki_data):
     else:
         term_score = 0
 
-    # Combined score: weighted average (TF-IDF 60%, term overlap 40%)
-    verification_score = round(tfidf_score * 0.6 + term_score * 0.4, 1)
+    # ---- Step 3: Description match boost ----
+    # If the Wikipedia description closely matches the claim, give a big boost
+    desc_boost = 0
+    if description:
+        desc_lower = description.lower()
+        user_lower = user_text.lower()
+        # Check if key phrases from description appear in user text
+        desc_words = set(w for w in re.sub(r'[^\w\s]', '', desc_lower).split()
+                         if w not in stop_words and len(w) > 2)
+        user_content = set(w for w in re.sub(r'[^\w\s]', '', user_lower).split()
+                           if w not in stop_words and len(w) > 2)
+        if desc_words and user_content:
+            desc_overlap = len(desc_words & user_content) / len(desc_words)
+            if desc_overlap > 0.6:
+                desc_boost = 30  # Strong description match
+            elif desc_overlap > 0.3:
+                desc_boost = 15
+
+    # Combined score: TF-IDF 40% + term overlap 30% + description boost 30%
+    verification_score = round(
+        tfidf_score * 0.4 + term_score * 0.3 + min(desc_boost, 30) * (100/30) * 0.3, 1
+    )
+    verification_score = min(100, verification_score)
 
     # Determine status
     if verification_score > 70:
         status = "VERIFIED FACT"
-        message = f"Wikipedia confirms this claim. Article: \"{wiki_data['title']}\"."
+        message = f"Wikipedia confirms this claim. Article: \"{wiki_title}\"."
     elif verification_score > 45:
         status = "PARTIALLY VERIFIED"
-        message = f"Wikipedia contains related information but not a full match. Article: \"{wiki_data['title']}\"."
+        message = f"Wikipedia contains related information but not a full match. Article: \"{wiki_title}\"."
     elif verification_score > 20:
         status = "WEAK MATCH"
         message = f"Wikipedia has some related content but the claim could not be strongly verified."
     else:
         status = "NOT VERIFIED"
-        message = f"The claim does not match Wikipedia content for \"{wiki_data['title']}\"."
+        message = f"The claim does not match Wikipedia content for \"{wiki_title}\"."
 
     # Generate insights
     insights = []
@@ -484,26 +589,26 @@ def verify_against_wikipedia(user_text, wiki_data):
         insights.append(f"Wikipedia confirms the statement.")
         insights.append(f"Fact matches trusted knowledge sources.")
     elif status == "PARTIALLY VERIFIED":
-        insights.append(f"Wikipedia contains related information in the article \"{wiki_data['title']}\".")
+        insights.append(f"Wikipedia contains related information in the article \"{wiki_title}\".")
     else:
-        insights.append(f"Wikipedia article \"{wiki_data['title']}\" found but claim could not be fully verified.")
+        insights.append(f"Wikipedia article \"{wiki_title}\" found but claim could not be fully verified.")
 
     insights.append(f"Wikipedia verification score: {verification_score}%.")
 
-    # Add description if it directly relates
     if description:
-        insights.append(f"Wikipedia describes \"{wiki_data['title']}\" as: {description}.")
+        insights.append(f"Wikipedia describes \"{wiki_title}\" as: {description}.")
 
     return {
         "verification_score": verification_score,
         "status": status,
         "message": message,
         "insights": insights,
-        "wiki_title": wiki_data.get("title", ""),
+        "wiki_title": wiki_title,
         "wiki_url": wiki_data.get("url", ""),
         "wiki_extract": extract[:300] if extract else "",
         "tfidf_score": tfidf_score,
-        "term_overlap_score": term_score
+        "term_overlap_score": term_score,
+        "is_contradicted": False
     }
 
 
@@ -533,19 +638,21 @@ def extract_main_claim(text):
     return ' '.join(words[:25])
 
 
+def _clean_search_query(query):
+    """Clean a query string for news API search."""
+    clean = re.sub(r'[^\w\s]', '', query)
+    return re.sub(r'\s+', ' ', clean).strip()[:200]
+
+
 def search_gnews(query, max_results=10, timeout=2.0):
     """
     Search GNews API for articles matching the query.
-    Returns a list of article dicts with title, description, source, url, publishedAt.
-    Timeout: 2 seconds (hard limit per spec).
+    Returns a list of article dicts.
     """
     if not GNEWS_API_KEY:
-        raise Exception("GNEWS_API_KEY is not configured")
+        return []
 
-    # Clean query for search — remove all punctuation that breaks GNews API syntax
-    clean_query = re.sub(r'[^\w\s]', '', query)
-    clean_query = re.sub(r'\s+', ' ', clean_query).strip()[:200]  # GNews query length limit
-
+    clean_query = _clean_search_query(query)
     url = "https://gnews.io/api/v4/search"
     params = {
         "q": clean_query,
@@ -559,23 +666,128 @@ def search_gnews(query, max_results=10, timeout=2.0):
         if response.status_code == 200:
             data = response.json()
             articles = data.get("articles", [])
-            return [{ 
+            return [{
                 "title": a.get("title", ""),
                 "description": a.get("description", ""),
                 "source": a.get("source", {}).get("name", "Unknown"),
                 "url": a.get("url", ""),
                 "published_at": a.get("publishedAt", "")
             } for a in articles]
-        elif response.status_code == 403:
-            raise Exception("GNews API key is invalid or quota exceeded")
-        elif response.status_code == 429:
-            raise Exception("GNews API rate limit exceeded")
         else:
-            raise Exception(f"GNews API error {response.status_code}: {response.text[:200]}")
-    except requests.exceptions.Timeout:
-        raise Exception("GNews API request timed out (2s limit)")
-    except requests.exceptions.ConnectionError:
-        raise Exception("Could not connect to GNews API")
+            print(f"GNews API error {response.status_code}")
+            return []
+    except Exception as e:
+        print(f"GNews error: {e}")
+        return []
+
+
+def search_newsdata(query, max_results=10, timeout=2.0):
+    """
+    Search NewsData.io API for articles matching the query.
+    Returns a list of article dicts (same format as search_gnews).
+    """
+    if not NEWSDATA_API_KEY:
+        return []
+
+    clean_query = _clean_search_query(query)
+    url = "https://newsdata.io/api/1/latest"
+    params = {
+        "apikey": NEWSDATA_API_KEY,
+        "q": clean_query,
+        "language": "en",
+        "size": max_results
+    }
+
+    try:
+        response = requests.get(url, params=params, timeout=timeout)
+        if response.status_code == 200:
+            data = response.json()
+            results = data.get("results", [])
+            if not results:
+                return []
+            return [{
+                "title": a.get("title", ""),
+                "description": a.get("description", "") or "",
+                "source": a.get("source_id", "Unknown"),
+                "url": a.get("link", ""),
+                "published_at": a.get("pubDate", "")
+            } for a in results if a.get("title")]
+        else:
+            print(f"NewsData.io API error {response.status_code}")
+            return []
+    except Exception as e:
+        print(f"NewsData.io error: {e}")
+        return []
+
+
+def search_newsapi(query, max_results=10, timeout=2.0):
+    """
+    Search NewsAPI.org for articles matching the query.
+    Returns a list of article dicts (same format as search_gnews).
+    Note: Free tier only works from localhost (developer use).
+    """
+    if not NEWSAPI_KEY:
+        return []
+
+    clean_query = _clean_search_query(query)
+    url = "https://newsapi.org/v2/everything"
+    params = {
+        "apiKey": NEWSAPI_KEY,
+        "q": clean_query,
+        "language": "en",
+        "sortBy": "relevancy",
+        "pageSize": max_results
+    }
+
+    try:
+        response = requests.get(url, params=params, timeout=timeout)
+        if response.status_code == 200:
+            data = response.json()
+            articles = data.get("articles", [])
+            return [{
+                "title": a.get("title", ""),
+                "description": a.get("description", "") or "",
+                "source": a.get("source", {}).get("name", "Unknown"),
+                "url": a.get("url", ""),
+                "published_at": a.get("publishedAt", "")
+            } for a in articles if a.get("title") and a.get("title") != "[Removed]"]
+        else:
+            print(f"NewsAPI.org error {response.status_code}")
+            return []
+    except Exception as e:
+        print(f"NewsAPI.org error: {e}")
+        return []
+
+
+def search_all_news_sources(query, max_results=10, timeout=2.0):
+    """
+    Search ALL news APIs in parallel and combine results.
+    Returns a deduplicated list of articles from all sources.
+    """
+    all_articles = []
+    seen_titles = set()
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {
+            'gnews': executor.submit(search_gnews, query, max_results, timeout),
+            'newsdata': executor.submit(search_newsdata, query, max_results, timeout),
+            'newsapi': executor.submit(search_newsapi, query, max_results, timeout),
+        }
+
+        for source_name, future in futures.items():
+            try:
+                articles = future.result(timeout=timeout + 1)
+                for article in articles:
+                    # Deduplicate by title similarity
+                    title_key = article['title'].lower().strip()[:60]
+                    if title_key not in seen_titles:
+                        seen_titles.add(title_key)
+                        all_articles.append(article)
+            except Exception as e:
+                print(f"[News] {source_name} failed: {e}")
+
+    print(f"[News] Combined: {len(all_articles)} articles from {len(futures)} sources")
+    return all_articles
 
 
 def compute_article_similarity(user_text, articles):
@@ -781,12 +993,8 @@ def _run_linguistic(text):
 
 
 def _run_wikipedia_verification(text, input_type):
-    """Run Wikipedia verification. Returns dict or None."""
+    """Run Wikipedia verification. Always runs for all input types."""
     try:
-        # Skip Wikipedia for pure news articles (GNews is primary)
-        if input_type == "news_article":
-            return None
-
         entity = extract_entity_for_wiki(text)
         print(f"[Wikipedia] Searching for entity: '{entity}'")
 
@@ -809,17 +1017,14 @@ def _run_wikipedia_verification(text, input_type):
         return None
 
 
-def _run_gnews_verification(text, input_type):
-    """Run GNews verification. Returns dict or None."""
+def _run_news_verification(text, input_type):
+    """Run multi-source news verification. Always runs for all input types."""
     try:
-        # Skip GNews for pure fact claims (Wikipedia is primary)
-        if input_type == "fact_claim":
-            return None
-
         claim = extract_main_claim(text)
-        print(f"[GNews] Searching for claim: '{claim[:80]}'")
+        print(f"[News] Searching all sources for: '{claim[:80]}'")
 
-        articles = search_gnews(claim, timeout=2.0)
+        # Search ALL news APIs in parallel
+        articles = search_all_news_sources(claim, timeout=2.0)
         similarity_scores = compute_article_similarity(text, articles)
         analysis = analyze_verification_results(text, articles, similarity_scores)
 
@@ -849,7 +1054,7 @@ def _run_gnews_verification(text, input_type):
             "claim_searched": claim
         }
     except Exception as e:
-        print(f"GNews task error: {e}")
+        print(f"News verification task error: {e}")
         return None
 
 
@@ -924,7 +1129,7 @@ def analyze():
             futures['wikipedia'] = executor.submit(_run_wikipedia_verification, text, input_type)
 
             task_starts['gnews'] = time.time()
-            futures['gnews'] = executor.submit(_run_gnews_verification, text, input_type)
+            futures['gnews'] = executor.submit(_run_news_verification, text, input_type)
 
             # Collect results with timeout
             for task_name, future in futures.items():

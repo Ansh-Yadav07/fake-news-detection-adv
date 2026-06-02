@@ -160,7 +160,10 @@ function generateWikipediaInsights(wikipedia) {
   const score = wikipedia.verification_score || 0;
   const title = wikipedia.wiki_title || "";
 
-  if (status === "VERIFIED FACT") {
+  if (status === "CONTRADICTED") {
+    insights.push(`⚠️ Wikipedia CONTRADICTS this claim.`);
+    insights.push(wikipedia.message || 'The claim does not match Wikipedia evidence.');
+  } else if (status === "VERIFIED FACT") {
     insights.push(`Wikipedia confirms the statement.`);
     insights.push(`Fact matches trusted knowledge sources.`);
     insights.push(`Wikipedia verification score: ${score}%.`);
@@ -353,6 +356,7 @@ export function getEnhancedDecisionWithVerification(
   // Wikipedia score
   const wikiScore = wikipedia ? (wikipedia.verification_score || 0) / 100 : 0;
   const wikiAvailable = wikipedia && wikipedia.status && wikipedia.status !== "NOT FOUND";
+  const wikiContradicted = wikipedia && wikipedia.is_contradicted === true;
 
   // GNews score
   const gnewsScore = verification ? (verification.verification_score || 0) / 100 : 0;
@@ -367,7 +371,7 @@ export function getEnhancedDecisionWithVerification(
   let verificationSource = "none";
 
   if (inputType === "fact_claim") {
-    // Fact claim → Wikipedia is dominant
+    // Fact claim → Wikipedia is dominant, but include GNews if available
     finalRealScore =
       (FACT_WEIGHTS.WIKIPEDIA * wikiScore) +
       (FACT_WEIGHTS.ML_MODELS * mlRealScore) +
@@ -379,10 +383,10 @@ export function getEnhancedDecisionWithVerification(
       ml: Math.round(mlRealScore * 100),
       linguistic: Math.round(linguisticRealScore * 100),
       clickbait: Math.round(clickbaitRealScore * 100),
-      gnews: 0,
-      credibility: 0
+      gnews: Math.round(gnewsScore * 100),
+      credibility: Math.round(credibilityScore * 100)
     };
-    verificationSource = "wikipedia";
+    verificationSource = gnewsAvailable ? "both" : "wikipedia";
 
   } else if (inputType === "news_article") {
     // News article → GNews is dominant
@@ -399,9 +403,9 @@ export function getEnhancedDecisionWithVerification(
       credibility: Math.round(credibilityScore * 100),
       linguistic: Math.round(linguisticRealScore * 100),
       clickbait: Math.round(clickbaitRealScore * 100),
-      wikipedia: 0
+      wikipedia: Math.round(wikiScore * 100)
     };
-    verificationSource = "gnews";
+    verificationSource = wikiAvailable ? "both" : "gnews";
 
   } else {
     // Mixed → use both sources
@@ -430,8 +434,14 @@ export function getEnhancedDecisionWithVerification(
   let confidence = 0;
   let reason = "";
 
+  // OVERRIDE RULE 0: Wikipedia CONTRADICTS the claim
+  if (wikiContradicted) {
+    final_label = "LIKELY FAKE";
+    confidence = 0.85;
+    reason = wikipedia.message || 'Wikipedia contradicts this claim.';
+  }
   // OVERRIDE RULE 1: Wikipedia confirms a fact claim
-  if (inputType === "fact_claim" && wikiAvailable && wikiScore > 0.70) {
+  else if (wikiAvailable && wikiScore > 0.70) {
     final_label = "VERIFIED FACT";
     confidence = Math.max(finalRealScore, 0.85);
     reason = `Wikipedia confirms this claim. ${wikipedia.message || ''}`;

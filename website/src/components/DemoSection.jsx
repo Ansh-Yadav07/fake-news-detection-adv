@@ -174,7 +174,7 @@ const DemoSection = () => {
           Content Analysis Engine
         </h2>
         <p className="text-zinc-500 max-w-xl mx-auto text-sm md:text-base font-medium">
-          Paste your article or headline below. Our parallel verification engine runs 6 concurrent checks — ML models, linguistic analysis, Wikipedia facts, and live news sources — in under 4 seconds.
+          Paste your article or headline below. Our parallel verification engine runs 6 concurrent checks — ML models, linguistic analysis, Wikipedia facts, and live news sources.
         </p>
       </div>
 
@@ -183,7 +183,7 @@ const DemoSection = () => {
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Paste text here... (e.g. 'Lucknow is the capital of Uttar Pradesh' or a full news article)"
+            placeholder="Paste text here... "
             className="w-full min-h-[160px] p-6 rounded-2xl bg-white/80 border border-zinc-200 text-zinc-900 placeholder:text-zinc-400 focus:outline-none focus:ring-4 focus:ring-zinc-900/5 focus:border-zinc-300 focus:bg-white transition-all resize-y text-base md:text-lg font-medium shadow-inner"
           />
         </div>

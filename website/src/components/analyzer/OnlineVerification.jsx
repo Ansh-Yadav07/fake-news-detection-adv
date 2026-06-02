@@ -83,6 +83,14 @@ const statusConfig = {
     icon: ShieldAlert,
     glowColor: 'rgba(239, 68, 68, 0.15)',
   },
+  'CONTRADICTED': {
+    color: 'text-red-800',
+    bg: 'bg-red-50',
+    border: 'border-red-300',
+    badgeBg: 'bg-red-700',
+    icon: ShieldAlert,
+    glowColor: 'rgba(239, 68, 68, 0.2)',
+  },
 };
 
 const CircularProgress = ({ value, size = 80, strokeWidth = 6, color }) => {
@@ -178,7 +186,7 @@ const OnlineVerification = ({ wikipedia, verification, verificationSource, input
 
   const progressColor = primaryStatus === 'VERIFIED' || primaryStatus === 'VERIFIED FACT' ? '#10b981'
     : primaryStatus === 'LIKELY SUPPORTED' ? '#0ea5e9'
-    : primaryStatus === 'SUSPICIOUS' || primaryStatus === 'NOT VERIFIED' ? '#ef4444'
+    : primaryStatus === 'SUSPICIOUS' || primaryStatus === 'NOT VERIFIED' || primaryStatus === 'CONTRADICTED' ? '#ef4444'
     : primaryStatus === 'PARTIALLY SUPPORTED' || primaryStatus === 'PARTIALLY VERIFIED' || primaryStatus === 'WEAK MATCH' ? '#f59e0b'
     : '#71717a';
 
