@@ -639,9 +639,28 @@ def extract_main_claim(text):
 
 
 def _clean_search_query(query):
-    """Clean a query string for news API search."""
+    """
+    Clean a query string for news API search.
+    Extracts up to 6 of the most important keywords to ensure we don't over-constrain the search API.
+    """
     clean = re.sub(r'[^\w\s]', '', query)
-    return re.sub(r'\s+', ' ', clean).strip()[:200]
+    words = clean.split()
+    
+    # Filter out stopwords and short words
+    content_words = [w for w in words if w.lower() not in stop_words and len(w) > 3]
+    
+    # If we have too many keywords, try to prioritize capitalized words (likely proper nouns)
+    if len(content_words) > 6:
+        capitalized = [w for w in content_words if w[0].isupper()]
+        others = [w for w in content_words if not w[0].isupper()]
+        # Take all capitalized, then fill the rest with other long words up to 6
+        selected = capitalized + others
+        content_words = selected[:6]
+    elif len(content_words) == 0:
+        # Fallback if everything was filtered out
+        content_words = words[:6]
+        
+    return ' '.join(content_words)
 
 
 def search_gnews(query, max_results=10, timeout=2.0):
