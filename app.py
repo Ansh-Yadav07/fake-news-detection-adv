@@ -966,40 +966,64 @@ def analyze_verification_results(user_text, articles, similarity_scores):
             "insights": ["No supporting articles found online for this claim."]
         }
 
-    # Count supporting articles (similarity > 20%)
-    supporting_threshold = 20
+    # Count supporting articles (similarity > 10% — lowered from 20%)
+    supporting_threshold = 10
     supporting = [(articles[i], similarity_scores[i])
                   for i in range(len(articles))
                   if similarity_scores[i] > supporting_threshold]
 
     supporting_count = len(supporting)
 
-    # Count trusted sources among supporting articles
-    trusted_supporting = [(a, s) for a, s in supporting if is_trusted_source(a['source'])]
-    trusted_count = len(trusted_supporting)
+    # Count trusted sources among ALL articles (not just supporting)
+    # A trusted source with even moderate similarity is meaningful
+    trusted_all = [(articles[i], similarity_scores[i])
+                   for i in range(len(articles))
+                   if is_trusted_source(articles[i]['source']) and similarity_scores[i] > 5]
+    trusted_count = len(trusted_all)
 
-    # Calculate verification score (weighted average of top similarities)
+    # Calculate verification score using WEIGHTED top matches
+    # Best match gets highest weight so a single strong match isn't diluted
     if similarity_scores:
-        # Weight top scores more heavily
         sorted_scores = sorted(similarity_scores, reverse=True)
-        top_scores = sorted_scores[:5]  # Top 5
-        verification_score = round(sum(top_scores) / len(top_scores), 1) if top_scores else 0
+        
+        # Weighted scoring: best match 40%, 2nd 25%, 3rd 15%, 4th 10%, 5th 10%
+        weights = [0.40, 0.25, 0.15, 0.10, 0.10]
+        weighted_sum = 0
+        for i, w in enumerate(weights):
+            if i < len(sorted_scores):
+                weighted_sum += sorted_scores[i] * w
+        
+        verification_score = round(weighted_sum, 1)
+        
+        # Boost if trusted source has a strong match
+        best_trusted_score = max([s for _, s in trusted_all], default=0)
+        if best_trusted_score > 30:
+            # Trusted source with decent match gets a significant boost
+            boost = min(best_trusted_score * 0.3, 20)
+            verification_score = round(min(100, verification_score + boost), 1)
     else:
         verification_score = 0
 
-    # Determine status
+    # Determine status — thresholds calibrated for real-world news headlines
+    # A BBC article at 52% similarity should be "LIKELY SUPPORTED" at minimum
     if supporting_count == 0:
         status = "UNVERIFIED"
         message = "No sufficient online evidence available."
-    elif verification_score > 80 and trusted_count >= 3:
+    elif verification_score > 50 and trusted_count >= 2:
         status = "VERIFIED"
         message = "Multiple trusted news organizations independently confirm this claim."
-    elif verification_score > 60 and trusted_count >= 1:
+    elif verification_score > 35 and trusted_count >= 1:
+        status = "VERIFIED"
+        message = f"Trusted news source confirms this claim (top match: {sorted_scores[0]:.0f}%)."
+    elif verification_score > 25 and (trusted_count >= 1 or supporting_count >= 3):
         status = "LIKELY SUPPORTED"
-        message = "Evidence from trusted sources partially supports this claim."
-    elif verification_score > 40 and supporting_count >= 3:
+        message = "Evidence from trusted sources supports this claim."
+    elif verification_score > 15 and supporting_count >= 2:
         status = "PARTIALLY SUPPORTED"
         message = "Some online sources report similar content."
+    elif supporting_count >= 1:
+        status = "PARTIALLY SUPPORTED"
+        message = "Limited online evidence found."
     else:
         status = "UNVERIFIED"
         message = "Insufficient evidence from trusted sources to verify this claim."
@@ -1009,7 +1033,7 @@ def analyze_verification_results(user_text, articles, similarity_scores):
     insights.append(f"{supporting_count} supporting article{'s' if supporting_count != 1 else ''} found online.")
 
     # Add top trusted source matches
-    for article, score in sorted(trusted_supporting, key=lambda x: x[1], reverse=True)[:4]:
+    for article, score in sorted(trusted_all, key=lambda x: x[1], reverse=True)[:4]:
         insights.append(f"{article['source']} supports the claim ({score}%).")
 
     if trusted_count > 0:

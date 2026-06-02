@@ -450,8 +450,8 @@ export function getEnhancedDecisionWithVerification(
       reason += ` Note: clickbait patterns detected (${clickbait_score}%) but overridden by Wikipedia evidence.`;
     }
   }
-  // OVERRIDE RULE 2: Strong GNews verification
-  else if (gnewsScore > 0.80 && trustedCount >= 3) {
+  // OVERRIDE RULE 2: Strong news verification (trusted source confirms)
+  else if (gnewsScore > 0.50 && trustedCount >= 2) {
     final_label = "VERIFIED";
     confidence = Math.max(finalRealScore, 0.85);
     reason = `Multiple trusted news organizations independently confirm this claim. Verification score: ${verification.verification_score}% with ${trustedCount} trusted sources.`;
@@ -459,6 +459,18 @@ export function getEnhancedDecisionWithVerification(
     if (clickbait_score > 50) {
       reason += ` Note: clickbait patterns detected (${clickbait_score}%) but overridden by strong real-world evidence.`;
     }
+  }
+  // OVERRIDE RULE 2b: Single trusted source with strong match
+  else if (gnewsScore > 0.35 && trustedCount >= 1) {
+    final_label = "VERIFIED";
+    confidence = Math.max(finalRealScore, 0.80);
+    reason = `Trusted news source confirms this claim. Verification score: ${verification.verification_score}% with ${trustedCount} trusted source(s).`;
+  }
+  // OVERRIDE RULE 2c: Many supporting articles (even without trusted)
+  else if (gnewsScore > 0.25 && supportingCount >= 3) {
+    final_label = "LIKELY REAL";
+    confidence = Math.max(finalRealScore, 0.75);
+    reason = `${supportingCount} online sources report similar content. Verification score: ${verification.verification_score}%.`;
   }
   // OVERRIDE RULE 3: No evidence found at all
   else if (!wikiAvailable && !gnewsAvailable) {
@@ -477,16 +489,16 @@ export function getEnhancedDecisionWithVerification(
     }
   }
   // Normal weighted decision
-  else if (finalRealScore > 0.70) {
-    if (inputType === "fact_claim" && wikiAvailable) {
+  else if (finalRealScore > 0.65) {
+    if (wikiAvailable && wikiScore > 0.50) {
       final_label = "VERIFIED FACT";
     } else {
       final_label = "VERIFIED";
     }
     confidence = finalRealScore;
-    const scoreSource = inputType === "fact_claim" ? `Wikipedia: ${wikipedia?.verification_score}%` : `GNews: ${verification?.verification_score}%`;
+    const scoreSource = wikiAvailable ? `Wikipedia: ${wikipedia?.verification_score}%` : `News: ${verification?.verification_score}%`;
     reason = `Strong combined evidence supports this claim. ${scoreSource}.`;
-  } else if (finalRealScore > 0.55) {
+  } else if (finalRealScore > 0.45) {
     final_label = "LIKELY REAL";
     confidence = finalRealScore;
     reason = `Multiple signals suggest this content is likely real.`;
@@ -496,11 +508,11 @@ export function getEnhancedDecisionWithVerification(
     if (wikiAvailable) {
       reason += ` Wikipedia contains related information.`;
     }
-  } else if (finalRealScore > 0.40) {
+  } else if (finalRealScore > 0.30) {
     final_label = "UNVERIFIED";
     confidence = 0.5;
     reason = `Analysis is inconclusive — mixed signals from ML models and online verification.`;
-  } else if (finalRealScore > 0.25) {
+  } else if (finalRealScore > 0.20) {
     final_label = "SUSPICIOUS";
     confidence = 1 - finalRealScore;
     reason = `Multiple signals raise concerns.`;
