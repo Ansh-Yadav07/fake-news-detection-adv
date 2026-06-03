@@ -140,7 +140,7 @@ const OnlineVerification = ({ wikipedia, verification, verificationSource, input
 
   // Determine which data to show based on source
   const hasWiki = wikipedia && wikipedia.status && wikipedia.status !== 'NOT FOUND';
-  const hasGNews = verification && verification.supporting_articles > 0;
+  const hasGNews = verification && (verification.supporting_articles > 0 || (verification.articles && verification.articles.length > 0));
 
   // Calculate combined verification score
   let primaryScore = 0;
@@ -168,15 +168,21 @@ const OnlineVerification = ({ wikipedia, verification, verificationSource, input
     supportingCount = verification.supporting_articles || 0;
     trustedCount = verification.trusted_source_count || 0;
   } else {
-    // Neither has good data — show what we have
+    // Neither has good data — still show what we have from news APIs
     if (wikipedia) {
       primaryScore = wikipedia.verification_score || 0;
       primaryStatus = wikipedia.status || 'NOT FOUND';
     }
     if (verification) {
-      primaryScore = Math.max(primaryScore, verification.verification_score || 0);
+      // If news returned a score, use the higher of wiki/news
+      const newsScore = verification.verification_score || 0;
+      if (newsScore > primaryScore) {
+        primaryScore = newsScore;
+      }
       primaryStatus = verification.status || primaryStatus;
       articles = verification.articles || [];
+      supportingCount = verification.supporting_articles || 0;
+      trustedCount = verification.trusted_source_count || 0;
     }
   }
 

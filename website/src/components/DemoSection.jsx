@@ -78,7 +78,11 @@ const DemoSection = () => {
 
       // Determine if ANY verification source is available
       const wikiAvailable = wikipedia && wikipedia.status && wikipedia.status !== "NOT FOUND";
-      const gnewsAvailable = verification && !verification.error;
+      const gnewsAvailable = verification && !verification.error && (
+        (verification.articles && verification.articles.length > 0) || 
+        verification.supporting_articles > 0 ||
+        verification.verification_score > 0
+      );
       const hasVerification = wikiAvailable || gnewsAvailable;
 
       // Get decision — WITH or WITHOUT verification

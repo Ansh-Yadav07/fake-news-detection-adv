@@ -24,7 +24,12 @@ CORS(app)
 
 # Stopwords (Hardcoded to avoid NLTK download hangs on startup in production)
 ENGLISH_STOPWORDS = {
-    'i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you', "you're", "you've", "you'll", "you'd", 'your', 'yours', 'yourself', 'yourselves', 'he', 'him', 'his', 'himself', 'she', "she's", 'her', 'hers', 'herself', 'it', "it's", 'its', 'itself', 'they', 'them', 'their', 'theirs', 'themselves', 'what', 'which', 'who', 'whom', 'this', 'that', "that'll", 'these', 'those', 'am', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'having', 'do', 'does', 'did', 'doing', 'a', 'an', 'the', 'and', 'but', 'if', 'or', 'because', 'as', 'until', 'while', 'of', 'at', 'by', 'for', 'with', 'about', 'against', 'between', 'into', 'through', 'during', 'before', 'after', 'above', 'below', 'to', 'from', 'up', 'down', 'in', 'out', 'on', 'off', 'over', 'under', 'again', 'further', 'then', 'once', 'here', 'there', 'when', 'where', 'why', 'how', 'all', 'any', 'both', 'each', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very', 's', 't', 'can', 'will', 'just', 'don', "don't", 'should', "should've", 'now', 'd', 'll', 'm', 'o', 're', 've', 'y', 'ain', 'aren', "aren't", 'couldn', "couldn't", 'didn', "didn't", 'doesn', "doesn't", 'hadn', "hadn't", 'hasn', "hasn't", 'haven', "haven't", 'isn', "isn't", 'ma', 'mightn', "mightn't", 'mustn', "mustn't", 'needn', "needn't", 'shan', "shan't", 'shouldn', "shouldn't", 'wasn', "wasn't", 'weren', "weren't", 'won', "won't", 'wouldn', "wouldn't"
+    'i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you', 
+    "you're", "you've", "you'll", "you'd", 'your', 'yours', 'yourself', 
+    'yourselves', 'he', 'him', 'his', 'himself', 'she', "she's", 'her', 
+    'hers', 'herself', 'it', "it's", 'its', 'itself', 'they', 'them', 
+    'their', 'theirs', 'themselves', 'what', 'which', 'who', 'whom', 
+    'this', 'that', "that'll", 'these', 'those', 'am', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'having', 'do', 'does', 'did', 'doing', 'a', 'an', 'the', 'and', 'but', 'if', 'or', 'because', 'as', 'until', 'while', 'of', 'at', 'by', 'for', 'with', 'about', 'against', 'between', 'into', 'through', 'during', 'before', 'after', 'above', 'below', 'to', 'from', 'up', 'down', 'in', 'out', 'on', 'off', 'over', 'under', 'again', 'further', 'then', 'once', 'here', 'there', 'when', 'where', 'why', 'how', 'all', 'any', 'both', 'each', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very', 's', 't', 'can', 'will', 'just', 'don', "don't", 'should', "should've", 'now', 'd', 'll', 'm', 'o', 're', 've', 'y', 'ain', 'aren', "aren't", 'couldn', "couldn't", 'didn', "didn't", 'doesn', "doesn't", 'hadn', "hadn't", 'hasn', "hasn't", 'haven', "haven't", 'isn', "isn't", 'ma', 'mightn', "mightn't", 'mustn', "mustn't", 'needn', "needn't", 'shan', "shan't", 'shouldn', "shouldn't", 'wasn', "wasn't", 'weren', "weren't", 'won', "won't", 'wouldn', "wouldn't"
 }
 stop_words = ENGLISH_STOPWORDS
 
@@ -60,13 +65,47 @@ TRUSTED_SOURCES = [
 
 # ---- News/Event Keywords for Input Classification ----
 EVENT_KEYWORDS = [
+    # Government & Politics
     "election", "government", "minister", "president", "prime minister",
+    "parliament", "congress", "bjp", "senate", "legislation", "bill",
+    "vote", "ballot", "campaign", "governor", "mayor", "chancellor",
+    "diplomatic", "embassy", "sanctions", "treaty", "summit",
+    # Events & Actions
     "launched", "announced", "yesterday", "today", "recently",
     "breaking", "reported", "according to", "sources say",
-    "company", "organization", "incident", "attack", "killed",
-    "arrested", "protest", "rally", "vote", "parliament",
-    "congress", "bjp", "nasa", "isro", "satellite", "war",
-    "pandemic", "covid", "earthquake", "flood", "storm"
+    "approved", "rejected", "signed", "proposed", "proposes",
+    "introduced", "unveiled", "revealed", "confirmed", "denied",
+    "ordered", "banned", "lifted", "suspended", "revoked",
+    # Business & Economy
+    "company", "organization", "ceo", "stock", "shares", "market",
+    "tariff", "tariffs", "duties", "import", "export", "trade",
+    "gdp", "inflation", "recession", "economy", "economic",
+    "billion", "million", "trillion", "revenue", "profit",
+    "merger", "acquisition", "ipo", "startup", "investment",
+    # Security & Incidents
+    "incident", "attack", "killed", "arrested", "protest", "rally",
+    "conflict", "ceasefire", "troops", "military", "defense",
+    "terror", "bombing", "shooting", "hostage", "crisis",
+    # Science & Tech
+    "nasa", "isro", "satellite", "space", "rocket", "mission",
+    "research", "study", "scientists", "discovered", "breakthrough",
+    "ai", "artificial intelligence", "technology", "cyber",
+    # Disasters & Health
+    "war", "pandemic", "covid", "earthquake", "flood", "storm",
+    "hurricane", "wildfire", "tsunami", "drought", "outbreak",
+    "vaccine", "virus", "disease", "health", "hospital",
+    # Sports
+    "match", "tournament", "championship", "olympics", "world cup",
+    "league", "cricket", "football", "medal", "finals",
+    # Legal
+    "court", "judge", "verdict", "lawsuit", "indicted", "charged",
+    "convicted", "sentenced", "bail", "appeal", "ruling",
+    # International
+    "countries", "nations", "global", "international", "foreign",
+    "violations", "compliance", "regulation", "policy", "reform",
+    # Organization acronyms
+    "ustr", "un", "who", "imf", "nato", "eu", "wto", "fbi", "cia",
+    "sebi", "rbi", "fda", "sec", "epa"
 ]
 
 # ---- Load Models ----
@@ -116,8 +155,8 @@ def classify_input(text):
     Classify user input to determine verification routing.
     Returns: 'fact_claim', 'news_article', or 'mixed'
     
-    - fact_claim: Short factual statements (< 25 words, no event keywords)
-    - news_article: Longer text with event/news keywords
+    - fact_claim: Short factual statements like "Earth orbits the Sun" (no event signals)
+    - news_article: Headlines or articles about current events
     - mixed: Uncertain — run both Wikipedia and GNews
     """
     words = text.split()
@@ -127,13 +166,32 @@ def classify_input(text):
     # Check for event/news keywords
     event_keyword_count = sum(1 for kw in EVENT_KEYWORDS if kw in text_lower)
 
-    # Short text with no event keywords → likely a factual claim
-    if word_count < 25 and event_keyword_count == 0:
-        return "fact_claim"
+    # Check for proper nouns (capitalized words that aren't first word)
+    # Headlines like "USTR proposes..." or "India announces..." have proper nouns
+    proper_nouns = [w for w in words[1:] if w[0].isupper() and w.lower() not in stop_words and len(w) > 1]
+    has_multiple_proper_nouns = len(proper_nouns) >= 2
+    has_proper_nouns = len(proper_nouns) >= 1
+    
+    # Check for numbers with % or specific figures (common in news)
+    has_numbers = bool(re.search(r'\d+\.?\d*%|\$\d|\d+\s*(billion|million|crore|lakh)', text_lower))
+    
+    # Check if first word is all-caps acronym (like USTR, NASA, WHO)
+    first_word_acronym = len(words) > 0 and words[0].isupper() and len(words[0]) >= 2 and words[0].isalpha()
+    
+    # News signal score — multiple signals compound
+    news_signals = event_keyword_count + (2 if has_multiple_proper_nouns else (1 if has_proper_nouns and event_keyword_count > 0 else 0)) + (1 if has_numbers else 0) + (2 if first_word_acronym else 0)
 
-    # Short text with event keywords → mixed (could be headline)
-    if word_count < 25 and event_keyword_count >= 1:
+    # Strong news signals → news_article regardless of length
+    if news_signals >= 3:
+        return "news_article"
+    
+    # Short text with at least some news signals → mixed (headline)
+    if word_count < 25 and news_signals >= 1:
         return "mixed"
+
+    # Short text with no signals at all → fact claim
+    if word_count < 25 and news_signals == 0:
+        return "fact_claim"
 
     # Longer text with event keywords → news article
     if word_count >= 25 and event_keyword_count >= 1:
@@ -969,8 +1027,9 @@ def analyze_verification_results(user_text, articles, similarity_scores):
             "insights": ["No supporting articles found online for this claim."]
         }
 
-    # Count supporting articles (similarity > 10% — lowered from 20%)
-    supporting_threshold = 10
+    # Count supporting articles (similarity > 5% — lowered to catch news headlines
+    # that use different wording than the original)
+    supporting_threshold = 5
     supporting = [(articles[i], similarity_scores[i])
                   for i in range(len(articles))
                   if similarity_scores[i] > supporting_threshold]
