@@ -125,6 +125,17 @@ const CircularProgress = ({ value, size = 80, strokeWidth = 6, color }) => {
   );
 };
 
+const ResponsiveCircularProgress = ({ value, color }) => (
+  <>
+    <div className="md:hidden">
+      <CircularProgress value={value} size={56} strokeWidth={5} color={color} />
+    </div>
+    <div className="hidden md:block">
+      <CircularProgress value={value} size={80} strokeWidth={6} color={color} />
+    </div>
+  </>
+);
+
 const sourceLabel = (source) => {
   if (source === 'wikipedia') return { text: 'Wikipedia', Icon: BookOpen, cls: 'text-violet-700 bg-violet-50 border-violet-200' };
   if (source === 'gnews') return { text: 'GNews', Icon: Newspaper, cls: 'text-sky-700 bg-sky-50 border-sky-200' };
@@ -200,69 +211,69 @@ const OnlineVerification = ({ wikipedia, verification, verificationSource, input
     <AnalysisCard title="Online Verification" icon={Globe}>
       <div className="flex flex-col h-full">
         {/* Source Badge */}
-        <div className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-lg border text-[10px] font-bold uppercase tracking-wide mb-3 self-start ${srcInfo.cls}`}>
-          <srcInfo.Icon className="w-3 h-3" />
+        <div className={`inline-flex items-center gap-1 md:gap-1.5 px-1.5 md:px-2 py-0.5 md:py-1 rounded-md md:rounded-lg border text-[8px] md:text-[10px] font-bold uppercase tracking-wide mb-2 md:mb-3 self-start ${srcInfo.cls}`}>
+          <srcInfo.Icon className="w-2.5 h-2.5 md:w-3 md:h-3" />
           {srcInfo.text}
         </div>
 
         {/* Score Circle + Status */}
-        <div className="flex items-center gap-5 mb-5">
+        <div className="flex items-center gap-2 md:gap-5 mb-3 md:mb-5">
           <div className="relative flex-shrink-0">
-            <CircularProgress value={primaryScore} color={progressColor} />
+            <ResponsiveCircularProgress value={primaryScore} color={progressColor} />
             <div className="absolute inset-0 flex items-center justify-center">
-              <span className="text-lg font-black text-zinc-900">{Math.round(primaryScore)}%</span>
+              <span className="text-xs md:text-lg font-black text-zinc-900">{Math.round(primaryScore)}%</span>
             </div>
           </div>
 
           <div className="flex-1 min-w-0">
-            <div className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold tracking-wide uppercase ${config.bg} ${config.color} ${config.border} border mb-2`}>
-              <StatusIcon className="w-3.5 h-3.5" />
+            <div className={`inline-flex items-center gap-1 md:gap-1.5 px-1.5 md:px-2.5 py-0.5 md:py-1 rounded-md md:rounded-lg text-[9px] md:text-xs font-bold tracking-wide uppercase ${config.bg} ${config.color} ${config.border} border mb-1 md:mb-2`}>
+              <StatusIcon className="w-2.5 h-2.5 md:w-3.5 md:h-3.5" />
               {primaryStatus}
             </div>
-            <p className="text-xs text-zinc-500 font-medium leading-snug">
+            <p className="text-[9px] md:text-xs text-zinc-500 font-medium leading-snug">
               Verification Score
             </p>
           </div>
         </div>
 
         {/* Stats Row */}
-        <div className="grid grid-cols-2 gap-3 mb-4">
+        <div className="grid grid-cols-2 gap-1.5 md:gap-3 mb-2 md:mb-4">
           {/* Wikipedia stats */}
           {hasWiki && (
-            <div className="bg-violet-50 border border-violet-100 rounded-xl p-3 text-center">
-              <div className="text-xl font-bold text-violet-900">{wikipedia.verification_score || 0}%</div>
-              <div className="text-[10px] font-semibold text-violet-500 uppercase tracking-wider mt-0.5">Wikipedia</div>
+            <div className="bg-violet-50 border border-violet-100 rounded-lg md:rounded-xl p-1.5 md:p-3 text-center">
+              <div className="text-sm md:text-xl font-bold text-violet-900">{wikipedia.verification_score || 0}%</div>
+              <div className="text-[8px] md:text-[10px] font-semibold text-violet-500 uppercase tracking-wider mt-0.5">Wikipedia</div>
             </div>
           )}
           {/* GNews supporting count */}
           {hasGNews && (
-            <div className="bg-sky-50 border border-sky-100 rounded-xl p-3 text-center">
-              <div className="text-xl font-bold text-sky-900">{supportingCount}</div>
-              <div className="text-[10px] font-semibold text-sky-500 uppercase tracking-wider mt-0.5">Supporting</div>
+            <div className="bg-sky-50 border border-sky-100 rounded-lg md:rounded-xl p-1.5 md:p-3 text-center">
+              <div className="text-sm md:text-xl font-bold text-sky-900">{supportingCount}</div>
+              <div className="text-[8px] md:text-[10px] font-semibold text-sky-500 uppercase tracking-wider mt-0.5">Supporting</div>
             </div>
           )}
           {/* Trusted sources */}
           {hasGNews && (
-            <div className="bg-zinc-50 border border-zinc-100 rounded-xl p-3 text-center">
-              <div className="text-xl font-bold text-zinc-900 flex items-center justify-center gap-1">
+            <div className="bg-zinc-50 border border-zinc-100 rounded-lg md:rounded-xl p-1.5 md:p-3 text-center">
+              <div className="text-sm md:text-xl font-bold text-zinc-900 flex items-center justify-center gap-1">
                 {trustedCount}
-                {trustedCount >= 3 && <Award className="w-4 h-4 text-emerald-500" />}
+                {trustedCount >= 3 && <Award className="w-3 h-3 md:w-4 md:h-4 text-emerald-500" />}
               </div>
-              <div className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider mt-0.5">Trusted</div>
+              <div className="text-[8px] md:text-[10px] font-semibold text-zinc-500 uppercase tracking-wider mt-0.5">Trusted</div>
             </div>
           )}
           {/* If only wiki but no gnews, fill with wiki info */}
           {hasWiki && !hasGNews && (
-            <div className="bg-zinc-50 border border-zinc-100 rounded-xl p-3 text-center">
-              <div className="text-xl font-bold text-zinc-900">1</div>
-              <div className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider mt-0.5">Sources</div>
+            <div className="bg-zinc-50 border border-zinc-100 rounded-lg md:rounded-xl p-1.5 md:p-3 text-center">
+              <div className="text-sm md:text-xl font-bold text-zinc-900">1</div>
+              <div className="text-[8px] md:text-[10px] font-semibold text-zinc-500 uppercase tracking-wider mt-0.5">Sources</div>
             </div>
           )}
         </div>
 
         {/* Wikipedia Extract */}
         {hasWiki && wikipedia.wiki_extract && (
-          <div className="mb-3 p-2.5 rounded-lg bg-violet-50/50 border border-violet-100">
+          <div className="mb-2 md:mb-3 p-1.5 md:p-2.5 rounded-lg bg-violet-50/50 border border-violet-100 hidden md:block">
             <p className="text-[11px] text-violet-800 leading-relaxed line-clamp-3">
               <span className="font-bold">Wikipedia:</span> {wikipedia.wiki_extract.substring(0, 150)}...
             </p>
@@ -284,10 +295,10 @@ const OnlineVerification = ({ wikipedia, verification, verificationSource, input
           <div className="mt-auto">
             <button
               onClick={() => setShowArticles(!showArticles)}
-              className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-zinc-50 border border-zinc-100 hover:border-zinc-200 transition-colors text-xs font-semibold text-zinc-600"
+              className="w-full flex items-center justify-between px-2 md:px-3 py-1.5 md:py-2 rounded-lg bg-zinc-50 border border-zinc-100 hover:border-zinc-200 transition-colors text-[10px] md:text-xs font-semibold text-zinc-600"
             >
-              <span>Source Matches ({articles.length})</span>
-              {showArticles ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+              <span>Sources ({articles.length})</span>
+              {showArticles ? <ChevronUp className="w-3 h-3 md:w-3.5 md:h-3.5" /> : <ChevronDown className="w-3 h-3 md:w-3.5 md:h-3.5" />}
             </button>
 
             {showArticles && (

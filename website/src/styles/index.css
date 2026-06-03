@@ -44,4 +44,18 @@
   .progress-bar-transition {
     transition: width 1s cubic-bezier(0.22, 1, 0.36, 1);
   }
+
+  .gauge-progress {
+    animation: gaugeIn 1.2s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  }
+
+  @keyframes gaugeIn {
+    from {
+      stroke-dashoffset: var(--circumference, 314);
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
 }

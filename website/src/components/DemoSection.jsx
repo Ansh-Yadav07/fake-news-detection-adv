@@ -251,7 +251,7 @@ const DemoSection = () => {
             </div>
           )}
 
-          <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-6">
             <ChartSection transformerConf={result.transformer.confidence} hybridConf={result.hybrid.confidence} />
             <FeatureBars {...result.features} />
             <StatsGrid {...result.stats} />
