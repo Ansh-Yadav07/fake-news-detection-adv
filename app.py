@@ -364,11 +364,31 @@ def extract_entity_for_wiki(text):
     """
     Extract the most relevant entity/topic from text for Wikipedia lookup.
     Focuses on proper nouns, capitalized words, and key subjects.
-    Returns a search query string.
+    
+    For relational claims like "X is capital of Y", returns BOTH entities
+    separately so we can verify from multiple angles.
+    
+    Returns a search query string (primary entity) or a list of queries
+    if multiple lookups are needed.
     """
     # Remove common noise words and punctuation
     clean = re.sub(r'[^\w\s]', '', text)
     words = clean.split()
+    text_lower = text.lower().strip()
+
+    # Strategy 0: Detect relational claims like "X is capital of Y"
+    # For these, we need to look up BOTH the subject and the object separately
+    relational_match = re.match(
+        r'^(.+?)\s+is\s+(?:the\s+)?(?:capital|president|prime minister|king|queen|leader|founder|ceo|chairman|head)\s+of\s+(.+?)$',
+        text_lower.rstrip('.')
+    )
+    if relational_match:
+        subject = relational_match.group(1).strip()
+        obj = relational_match.group(2).strip()
+        # Return the subject as primary query — we want to check what the subject actually is
+        # e.g., for "India is capital of London", look up "India" to see it's a country, not a city
+        # The caller (_run_wikipedia_verification) will also try the object
+        return subject.title()
 
     # Strategy 1: Find capitalized words (likely proper nouns/entities)
     capitalized = [w for w in words if w[0].isupper() and w.lower() not in stop_words and len(w) > 1]
@@ -471,6 +491,7 @@ def _detect_contradiction(user_text, wiki_description, wiki_extract, wiki_title)
     Detect if the user's claim CONTRADICTS Wikipedia information.
     Handles cases like:
       - "Lucknow is capital of India" vs Wikipedia: "Capital of Uttar Pradesh, India"
+      - "India is capital of London" vs Wikipedia: "India is a country" (not a capital)
       - "Earth is flat" vs Wikipedia: "third planet from the Sun"
     
     Returns (is_contradicted: bool, contradiction_detail: str)
@@ -481,20 +502,116 @@ def _detect_contradiction(user_text, wiki_description, wiki_extract, wiki_title)
     wiki_full = f"{desc_lower} {extract_lower}"
 
     # Pattern 1: "X is capital of Y" claims
+    capital_claim_match = re.match(
+        r'^(.+?)\s+is\s+(?:the\s+)?capital\s+of\s+(.+?)$',
+        user_lower.rstrip('.')
+    )
+    if capital_claim_match:
+        claimed_capital = capital_claim_match.group(1).strip()  # e.g., "india"
+        claimed_country = capital_claim_match.group(2).strip()  # e.g., "london"
+
+        # Check 1: Is the subject (claimed capital) actually described as a capital by Wikipedia?
+        # If Wikipedia says the subject is a "country", "continent", etc., it can't be a capital
+        non_capital_types = ['country', 'continent', 'ocean', 'sea', 'river', 'mountain',
+                            'planet', 'star', 'galaxy', 'language', 'religion',
+                            'sport', 'game', 'company', 'organization']
+        wiki_title_lower = (wiki_title or "").lower()
+        
+        # Check if the Wikipedia article we found is about the subject (claimed capital)
+        if wiki_title_lower and (
+            claimed_capital in wiki_title_lower or wiki_title_lower in claimed_capital
+        ):
+            # We're looking at the subject's Wikipedia page
+            for non_type in non_capital_types:
+                if non_type in desc_lower:
+                    return True, (
+                        f"'{claimed_capital.title()}' is described by Wikipedia as a "
+                        f"{non_type}, not a capital city. It cannot be the capital of "
+                        f"'{claimed_country.title()}'"
+                    )
+            
+            # Check 1b: Subject IS described as a capital, but of a DIFFERENT place
+            # e.g., "Lucknow is capital of India" but Wikipedia says "Capital of Uttar Pradesh"
+            if 'capital' in desc_lower:
+                wiki_capital_of_match = re.search(
+                    r'capital\s+(?:of|city\s+of)\s+([\w\s,]+?)(?:\.|$|,)',
+                    desc_lower
+                )
+                if wiki_capital_of_match:
+                    wiki_capital_of = wiki_capital_of_match.group(1).strip().rstrip('.')
+                    # Check if claimed_country matches what wiki says this is a capital of
+                    claimed_words = set(claimed_country.lower().split())
+                    wiki_of_words = set(wiki_capital_of.lower().split())
+                    # Remove common noise words for comparison
+                    noise = {'and', 'the', 'of'}
+                    claimed_words -= noise
+                    wiki_of_words -= noise
+                    if claimed_words and wiki_of_words and not claimed_words.intersection(wiki_of_words):
+                        return True, (
+                            f"'{claimed_capital.title()}' is the capital of "
+                            f"'{wiki_capital_of.title()}', not '{claimed_country.title()}' as claimed"
+                        )
+            
+            # Also check: does Wikipedia say this IS a capital? If not, that's suspicious
+            if 'capital' not in desc_lower and 'capital' not in extract_lower[:200]:
+                return True, (
+                    f"Wikipedia does not describe '{claimed_capital.title()}' as a capital city. "
+                    f"Wikipedia says: \"{wiki_description}\""
+                )
+
+        # Check 2: If we're looking at the object's (claimed country's) page,
+        # check what Wikipedia says the actual capital is
+        if wiki_title_lower and (
+            claimed_country in wiki_title_lower or wiki_title_lower in claimed_country
+        ):
+            # Look for "capital of" in wiki description/extract
+            wiki_capital_match = re.search(
+                r'capital\s+(?:of|city\s+of|and)\s+([\w\s,]+?)(?:\.|$|,)',
+                desc_lower
+            )
+            if not wiki_capital_match:
+                wiki_capital_match = re.search(
+                    r'capital\s+(?:of|city\s+of|and)\s+([\w\s,]+?)(?:\.|$|,)',
+                    extract_lower
+                )
+            
+            if wiki_capital_match:
+                wiki_says_capital_of = wiki_capital_match.group(1).strip().rstrip('.')
+                user_claim_words = set(claimed_country.lower().split())
+                wiki_claim_words = set(wiki_says_capital_of.lower().split())
+                if not user_claim_words.issubset(wiki_claim_words) and not wiki_claim_words.issubset(user_claim_words):
+                    return True, (
+                        f"User claims '{claimed_capital.title()}' is capital of "
+                        f"'{claimed_country.title()}' but Wikipedia says capital of "
+                        f"'{wiki_says_capital_of.title()}'"
+                    )
+            
+            # Also check: Wikipedia says the actual capital in its extract
+            # e.g. "The capital of India is New Delhi" or "its capital is New Delhi"
+            actual_capital_match = re.search(
+                r'(?:the\s+)?capital\s+(?:is|city\s+is|,)\s+([\w\s]+?)(?:\.|,|\s+and\s)',
+                extract_lower
+            )
+            if actual_capital_match:
+                actual_capital = actual_capital_match.group(1).strip()
+                if claimed_capital not in actual_capital and actual_capital not in claimed_capital:
+                    return True, (
+                        f"Wikipedia states the capital is '{actual_capital.title()}', "
+                        f"not '{claimed_capital.title()}'"
+                    )
+
+    # Pattern 1b: Legacy "X is capital of Y" check (when wiki was found for a different entity)
     capital_match = re.search(r'(?:is|the)\s+(?:the\s+)?capital\s+of\s+([\w\s]+)', user_lower)
-    if capital_match:
+    if capital_match and not capital_claim_match:
         user_claims_capital_of = capital_match.group(1).strip().rstrip('.')
-        # Check what Wikipedia says the capital is of
         wiki_capital_match = re.search(r'capital\s+(?:of|city\s+of)\s+([\w\s,]+?)(?:\.|$|,)', desc_lower)
         if not wiki_capital_match:
             wiki_capital_match = re.search(r'capital\s+(?:of|city\s+of)\s+([\w\s,]+?)(?:\.|$|,)', extract_lower)
         
         if wiki_capital_match:
             wiki_says_capital_of = wiki_capital_match.group(1).strip().rstrip('.')
-            # Compare: does user claim match what Wikipedia says?
             user_claim_words = set(user_claims_capital_of.lower().split())
             wiki_claim_words = set(wiki_says_capital_of.lower().split())
-            # If wiki says "uttar pradesh" but user says "india", that's a contradiction
             if not user_claim_words.issubset(wiki_claim_words) and not wiki_claim_words.issubset(user_claim_words):
                 return True, f"User claims capital of '{user_claims_capital_of}' but Wikipedia says capital of '{wiki_says_capital_of}'"
 
@@ -504,11 +621,9 @@ def _detect_contradiction(user_text, wiki_description, wiki_extract, wiki_title)
         subject = is_match.group(1).strip()
         user_predicate = is_match.group(2).strip()
         # Check for direct numerical/factual contradictions
-        # e.g., user says "population is 500 million" but wiki says "population of 1.4 billion"
         user_numbers = re.findall(r'\d+', user_predicate)
         wiki_numbers = re.findall(r'\d+', desc_lower)
         if user_numbers and wiki_numbers:
-            # If they have numbers that are very different, flag potential contradiction
             pass  # Too complex for simple check, skip for now
 
     # Pattern 3: Flat Earth / well-known false claims
@@ -1200,25 +1315,75 @@ def _run_linguistic(text):
 
 
 def _run_wikipedia_verification(text, input_type):
-    """Run Wikipedia verification. Always runs for all input types."""
+    """Run Wikipedia verification. Always runs for all input types.
+    
+    For relational claims like 'X is capital of Y', performs TWO Wikipedia lookups:
+    1. Look up the subject (X) to check if it can even be a capital
+    2. Look up the object (Y) to check what the real capital is
+    The strongest contradiction result wins.
+    """
     try:
         entity = extract_entity_for_wiki(text)
         print(f"[Wikipedia] Searching for entity: '{entity}'")
 
         wiki_data = search_wikipedia(entity, timeout=1.5)
-        if not wiki_data:
-            return {
-                "verification_score": 0,
-                "status": "NOT FOUND",
-                "message": "No Wikipedia article found.",
-                "insights": ["No relevant Wikipedia article found for verification."],
-                "wiki_title": "",
-                "wiki_url": "",
-                "wiki_extract": ""
-            }
+        
+        # For relational claims, also try looking up the object entity
+        text_lower = text.lower().strip()
+        relational_match = re.match(
+            r'^(.+?)\s+is\s+(?:the\s+)?(?:capital|president|prime minister|king|queen|leader|founder|ceo|chairman|head)\s+of\s+(.+?)$',
+            text_lower.rstrip('.')
+        )
+        
+        result_subject = None
+        result_object = None
+        
+        if wiki_data:
+            result_subject = verify_against_wikipedia(text, wiki_data)
+        
+        # If this is a relational claim, also look up the object (e.g., "London" in "India is capital of London")
+        if relational_match:
+            obj_entity = relational_match.group(2).strip().title()
+            if obj_entity.lower() != entity.lower():
+                print(f"[Wikipedia] Also searching for object entity: '{obj_entity}'")
+                wiki_data_obj = search_wikipedia(obj_entity, timeout=1.5)
+                if wiki_data_obj:
+                    result_object = verify_against_wikipedia(text, wiki_data_obj)
+        
+        # Pick the best result — prioritize contradictions
+        if result_subject and result_subject.get('is_contradicted'):
+            return result_subject
+        if result_object and result_object.get('is_contradicted'):
+            return result_object
+        
+        # If neither found a contradiction, return the one with the higher score
+        # (or lower score if both are low — the point is to return the most informative result)
+        if result_subject and result_object:
+            # If one has a much higher verification score, use it
+            # But if both are low, prefer the one that at least found something
+            if result_subject.get('status') == 'NOT FOUND' and result_object.get('status') != 'NOT FOUND':
+                return result_object
+            if result_object.get('status') == 'NOT FOUND' and result_subject.get('status') != 'NOT FOUND':
+                return result_subject
+            # Return the one with higher verification score
+            if (result_object.get('verification_score', 0) > result_subject.get('verification_score', 0)):
+                return result_object
+            return result_subject
+        
+        if result_subject:
+            return result_subject
+        if result_object:
+            return result_object
 
-        result = verify_against_wikipedia(text, wiki_data)
-        return result
+        return {
+            "verification_score": 0,
+            "status": "NOT FOUND",
+            "message": "No Wikipedia article found.",
+            "insights": ["No relevant Wikipedia article found for verification."],
+            "wiki_title": "",
+            "wiki_url": "",
+            "wiki_extract": ""
+        }
     except Exception as e:
         print(f"Wikipedia task error: {e}")
         return None
