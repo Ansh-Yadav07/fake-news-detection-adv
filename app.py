@@ -5,22 +5,71 @@ import re
 import joblib
 import requests
 import time
+import logging
+import threading
 import urllib.parse
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait as futures_wait
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from cachetools import TTLCache
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity as sklearn_cosine_similarity
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import nltk
-from nltk.corpus import stopwords
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from werkzeug.middleware.proxy_fix import ProxyFix
 from transformers import pipeline
 from dotenv import load_dotenv
 
 load_dotenv()
 
+# ---- Logging ----
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s"
+    )
+logger = logging.getLogger(__name__)
+
 # ---- Initialization and Setup ----
 app = Flask(__name__)
-CORS(app)
+
+# Reject oversized request bodies early (413) — 64KB is plenty for 10,000 chars of text
+app.config['MAX_CONTENT_LENGTH'] = 64 * 1024
+
+# Trust exactly one proxy hop for X-Forwarded-For (so rate limiting sees the real client IP)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
+
+# ---- CORS (API routes only, origins from ALLOWED_ORIGINS) ----
+# Comma-separated list. When unset, falls back to local dev origins plus the
+# deployed frontend origins found in the repo (none at the time of writing).
+# PRODUCTION: set ALLOWED_ORIGINS to your deployed frontend origin(s).
+DEFAULT_ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+ALLOWED_ORIGINS = [
+    o.strip().rstrip('/')
+    for o in os.environ.get("ALLOWED_ORIGINS", "").split(",")
+    if o.strip()
+] or DEFAULT_ALLOWED_ORIGINS
+CORS(
+    app,
+    resources={r"/(analyze|predict|verify)": {"origins": ALLOWED_ORIGINS}},
+    methods=["POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
+    max_age=600,
+)
+
+# ---- Rate limiting (in-memory, per client IP) ----
+RATE_LIMIT = os.environ.get("RATE_LIMIT", "20 per minute")
+limiter = Limiter(
+    key_func=get_remote_address,
+    app=app,
+    default_limits=[],
+    storage_uri="memory://",
+)
 
 # Stopwords (Hardcoded to avoid NLTK download hangs on startup in production)
 ENGLISH_STOPWORDS = {
@@ -41,6 +90,65 @@ NEWSAPI_KEY = os.environ.get("NEWSAPI_KEY", "")
 SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "")
 HF_MODEL_ID = "anshy047/fake-news-detector-transformer"
 
+# ---- Timing budgets / concurrency (env-overridable) ----
+ANALYZE_BUDGET_S = float(os.environ.get("ANALYZE_BUDGET_S", "8"))
+ANALYZE_WORKERS = int(os.environ.get("ANALYZE_WORKERS", "16"))
+HF_TIMEOUT_S = float(os.environ.get("HF_TIMEOUT_S", "6"))
+MAX_TEXT_CHARS = 10000
+CACHE_TTL_S = int(os.environ.get("CACHE_TTL_S", "900"))
+CACHE_MAXSIZE = int(os.environ.get("CACHE_MAXSIZE", "512"))
+
+# Shared executors: never created per request and never shut down with wait=True
+# in the request path, so a slow external call can't block a response.
+_EXECUTOR = ThreadPoolExecutor(max_workers=ANALYZE_WORKERS, thread_name_prefix="analyze")
+# Separate pool for the nested per-source news lookups (avoids pool self-deadlock)
+_IO_EXECUTOR = ThreadPoolExecutor(max_workers=ANALYZE_WORKERS, thread_name_prefix="io")
+
+# ---- Shared HTTP session (connection pooling + one retry on transient gateway errors) ----
+_http = requests.Session()
+_retry = Retry(total=1, backoff_factor=0, status_forcelist=[502, 503, 504])
+_adapter = HTTPAdapter(max_retries=_retry, pool_connections=16, pool_maxsize=32)
+_http.mount("https://", _adapter)
+_http.mount("http://", _adapter)
+
+# ---- Thread-safe TTL cache for external lookups ----
+_cache = TTLCache(maxsize=CACHE_MAXSIZE, ttl=CACHE_TTL_S)
+_cache_lock = threading.Lock()
+_MISS = object()
+
+
+def _cache_get(key):
+    with _cache_lock:
+        return _cache.get(key, _MISS)
+
+
+def _cache_set(key, value):
+    with _cache_lock:
+        _cache[key] = value
+
+
+# ---- Safe logging of exceptions (API keys travel as query params) ----
+_SECRET_QS_RE = re.compile(r'(?i)\b(api[_-]?key|apikey|token|key|access_token)=[^&\s\'")]+')
+
+
+def _safe_err(e):
+    """Exception type + sanitized message, safe to log (strips API keys from URLs)."""
+    msg = _SECRET_QS_RE.sub(r'\1=***', str(e))
+    for secret in (HF_TOKEN, GNEWS_API_KEY, NEWSDATA_API_KEY, NEWSAPI_KEY, SERPAPI_KEY):
+        if secret:
+            msg = msg.replace(secret, '***')
+    return f"{type(e).__name__}: {msg[:200]}"
+
+
+def _normalize_label(raw):
+    """Map a raw model label to REAL / FAKE / UNKNOWN (case-insensitive)."""
+    key = str(raw).strip().upper()
+    if key in ("LABEL_1", "1", "REAL"):
+        return "REAL"
+    if key in ("LABEL_0", "0", "FAKE"):
+        return "FAKE"
+    return "UNKNOWN"
+
 # Local model paths
 TRANSFORMER_MODEL_PATH = "models/transformer"
 MODEL_PATH = "models/ml_lr_model.pkl"
@@ -60,8 +168,12 @@ CLICKBAIT_TRIGGERS = [
 TRUSTED_SOURCES = [
     "reuters", "ap news", "bbc", "the hindu",
     "indian express", "times of india", "hindustan times", "ndtv",
-    "associated press", "bbc news"
+    "associated press", "bbc news",
+    # Compact forms used in domains and NewsData source_ids (e.g. "apnews.com", "timesofindia")
+    "apnews", "thehindu", "indianexpress", "timesofindia", "hindustantimes",
 ]
+# Whole-phrase match on a normalized name, so generic fragments ("News", "The", "") never match
+_TRUSTED_SOURCE_PATTERNS = [re.compile(rf"\b{re.escape(t)}\b") for t in TRUSTED_SOURCES]
 
 # ---- News/Event Keywords for Input Classification ----
 EVENT_KEYWORDS = [
@@ -109,7 +221,7 @@ EVENT_KEYWORDS = [
 ]
 
 # ---- Load Models ----
-print("Loading local models...")
+logger.info("Loading local models...")
 hybrid_clf = None
 tfidf = None
 local_transformer = None
@@ -117,11 +229,11 @@ local_transformer = None
 try:
     hybrid_clf = joblib.load(MODEL_PATH)
     tfidf = joblib.load(TFIDF_PATH)
-    print(f"Local ML models loaded successfully!")
+    logger.info("Local ML models loaded successfully")
 except FileNotFoundError as e:
-    print(f"ERROR: Model file not found: {e}")
+    logger.error("Model file not found: %s", e)
 except Exception as e:
-    print(f"ERROR loading ML models: {type(e).__name__}: {str(e)}")
+    logger.error("Error loading ML models: %s: %s", type(e).__name__, e)
 
 try:
     if os.path.exists(TRANSFORMER_MODEL_PATH):
@@ -132,18 +244,16 @@ try:
             max_length=512,
             truncation=True
         )
-        print("Local Transformer loaded successfully!")
+        logger.info("Local Transformer loaded successfully")
     else:
-        print(f"WARNING: Local transformer path '{TRANSFORMER_MODEL_PATH}' not found.")
-        print("Will attempt HuggingFace Inference API as fallback.")
+        logger.warning("Local transformer path '%s' not found. Will attempt HuggingFace Inference API as fallback.", TRANSFORMER_MODEL_PATH)
 except Exception as e:
-    print(f"WARNING: Could not load local transformer: {type(e).__name__}: {str(e)}")
-    print("Will attempt HuggingFace Inference API as fallback.")
+    logger.warning("Could not load local transformer (%s: %s). Will attempt HuggingFace Inference API as fallback.", type(e).__name__, e)
 
 if not hybrid_clf:
-    print("WARNING: ML model will not be available")
+    logger.warning("ML model will not be available")
 if not tfidf:
-    print("WARNING: TFIDF vectorizer not available")
+    logger.warning("TFIDF vectorizer not available")
 
 
 # ======================================================================
@@ -286,74 +396,67 @@ def extract_features(text):
 # HUGGINGFACE INFERENCE API (FALLBACK)
 # ======================================================================
 
-def get_hf_classification(text, max_retries=3):
+def get_hf_classification(text, max_retries=1):
     """
     Call HuggingFace Inference API as a fallback when local transformer is unavailable.
     Uses the model: anshy047/fake-news-detector-transformer
+
+    Fails fast: overall time is capped at HF_TIMEOUT_S (default 6s, inside the analyze
+    budget), at most `max_retries` retry, and no sleeping. A loading model (503) or a
+    timeout is not retried.
     """
     if not HF_TOKEN:
-        raise Exception("HF_TOKEN is not configured")
+        raise RuntimeError("HF_TOKEN is not configured")
 
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
     API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL_ID}"
+    deadline = time.time() + HF_TIMEOUT_S
 
-    for attempt in range(max_retries):
+    for attempt in range(max_retries + 1):
+        remaining = deadline - time.time()
+        if remaining <= 0.25:
+            raise RuntimeError("HF API time budget exhausted")
         try:
-            response = requests.post(
+            response = _http.post(
                 API_URL,
                 headers=headers,
                 json={"inputs": text[:512]},  # Truncate to model's max length
-                timeout=30
+                timeout=remaining
             )
-
-            if response.status_code == 200:
-                result = response.json()
-
-                # HF returns [[{label, score}, ...]] or [{label, score}, ...]
-                if isinstance(result, list) and len(result) > 0:
-                    # Unwrap nested list if needed
-                    predictions = result[0] if isinstance(result[0], list) else result
-                    if isinstance(predictions, list) and len(predictions) > 0:
-                        best = max(predictions, key=lambda x: x.get('score', 0))
-                        return best.get('label', 'UNKNOWN'), best.get('score', 0.5)
-
-                # If result is a dict with error
-                if isinstance(result, dict) and "error" in result:
-                    if "loading" in result["error"].lower() or "estimated_time" in result:
-                        wait_time = min(result.get("estimated_time", 20), 30)
-                        print(f"HF model loading. Waiting {wait_time}s... (Attempt {attempt+1}/{max_retries})")
-                        time.sleep(wait_time)
-                        continue
-                    else:
-                        raise Exception(f"HF API error: {result['error']}")
-
-            elif response.status_code == 503:
-                try:
-                    error_data = response.json()
-                    wait_time = min(error_data.get("estimated_time", 20), 30)
-                    print(f"HF model loading (503). Waiting {wait_time}s... (Attempt {attempt+1}/{max_retries})")
-                    time.sleep(wait_time)
-                    continue
-                except ValueError:
-                    pass
-                raise Exception(f"HF API 503: Service Unavailable")
-
-            else:
-                raise Exception(f"HF API error {response.status_code}: {response.text[:200]}")
-
         except requests.exceptions.Timeout:
-            print(f"HF API timeout (attempt {attempt+1}/{max_retries})")
-            if attempt < max_retries - 1:
-                time.sleep(5)
-            continue
-        except Exception as e:
-            if attempt < max_retries - 1:
-                print(f"HF API error: {str(e)}, retrying...")
-                time.sleep(3)
+            raise RuntimeError("HF API timeout")
+        except requests.exceptions.RequestException as e:
+            if attempt < max_retries:
+                logger.warning("HF API request error (attempt %d/%d): %s", attempt + 1, max_retries + 1, _safe_err(e))
                 continue
-            raise
+            raise RuntimeError(f"HF API request failed: {type(e).__name__}")
 
-    raise Exception(f"Failed to get HF API response after {max_retries} attempts")
+        if response.status_code == 200:
+            result = response.json()
+
+            # HF returns [[{label, score}, ...]] or [{label, score}, ...]
+            if isinstance(result, list) and len(result) > 0:
+                # Unwrap nested list if needed
+                predictions = result[0] if isinstance(result[0], list) else result
+                if isinstance(predictions, list) and len(predictions) > 0:
+                    best = max(predictions, key=lambda x: x.get('score', 0))
+                    return best.get('label', 'UNKNOWN'), best.get('score', 0.5)
+
+            if isinstance(result, dict) and "error" in result:
+                # Includes "model is loading" — fail fast rather than sleeping
+                raise RuntimeError("HF API returned an error response")
+            raise RuntimeError("HF API returned an unexpected response")
+
+        if response.status_code == 503:
+            # Model loading / unavailable: fail fast (no sleep in the request path)
+            raise RuntimeError("HF API 503: model loading or unavailable")
+
+        if response.status_code >= 500 and attempt < max_retries:
+            logger.warning("HF API error %d (attempt %d/%d)", response.status_code, attempt + 1, max_retries + 1)
+            continue
+        raise RuntimeError(f"HF API error {response.status_code}")
+
+    raise RuntimeError("Failed to get HF API response")
 
 
 # ======================================================================
@@ -408,21 +511,35 @@ def extract_entity_for_wiki(text):
 
 def search_wikipedia(query, timeout=1.5):
     """
-    Search Wikipedia REST API for a summary of the given query.
+    Search Wikipedia REST API for a summary of the given query (cached).
     Uses the page summary endpoint.
     Timeout: 1.5 seconds (hard limit per spec).
-    
-    Returns dict with title, extract, description, url or None on failure.
+
+    Returns dict with title, extract, description, url or None on failure / not found.
+    Only definitive answers (found / genuinely not found) are cached, never errors.
     """
     if not query or not query.strip():
         return None
 
+    key = ("wiki", query.strip().lower())
+    cached = _cache_get(key)
+    if cached is not _MISS:
+        return cached
+
+    result, definitive = _search_wikipedia_uncached(query, timeout)
+    if definitive:
+        _cache_set(key, result)
+    return result
+
+
+def _search_wikipedia_uncached(query, timeout=1.5):
+    """Returns (result_or_None, definitive: bool). definitive=False means a lookup error."""
     # URL-encode the query for the REST API
     encoded_query = urllib.parse.quote(query.strip().replace(' ', '_'))
     url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{encoded_query}"
 
     try:
-        response = requests.get(
+        response = _http.get(
             url,
             headers={"User-Agent": "FakeNewsDetector/1.0"},
             timeout=timeout
@@ -434,8 +551,8 @@ def search_wikipedia(query, timeout=1.5):
                 # Try the first word only for disambiguation pages
                 first_word = query.strip().split()[0]
                 if first_word != query.strip():
-                    return search_wikipedia(first_word, timeout=timeout)
-                return None
+                    return _search_wikipedia_uncached(first_word, timeout=timeout)
+                return None, True
 
             return {
                 "title": data.get("title", ""),
@@ -443,24 +560,26 @@ def search_wikipedia(query, timeout=1.5):
                 "description": data.get("description", ""),
                 "url": data.get("content_urls", {}).get("desktop", {}).get("page", ""),
                 "found": True
-            }
+            }, True
         elif response.status_code == 404:
             # Try Wikipedia search API as fallback
             return _wikipedia_search_fallback(query, timeout)
         else:
-            return None
+            logger.warning("Wikipedia API returned status %d", response.status_code)
+            return None, False
 
     except requests.exceptions.Timeout:
-        print(f"Wikipedia API timed out for query: '{query}'")
-        return None
+        logger.warning("Wikipedia API timed out for query: '%s'", query)
+        return None, False
     except Exception as e:
-        print(f"Wikipedia API error: {e}")
-        return None
+        logger.warning("Wikipedia API error: %s", _safe_err(e))
+        return None, False
 
 
 def _wikipedia_search_fallback(query, timeout=1.5):
     """
     Fallback: use Wikipedia search API to find the best matching article.
+    Returns (result_or_None, definitive: bool).
     """
     search_url = "https://en.wikipedia.org/w/api.php"
     params = {
@@ -472,18 +591,20 @@ def _wikipedia_search_fallback(query, timeout=1.5):
     }
 
     try:
-        resp = requests.get(search_url, params=params, timeout=timeout,
-                            headers={"User-Agent": "FakeNewsDetector/1.0"})
+        resp = _http.get(search_url, params=params, timeout=timeout,
+                         headers={"User-Agent": "FakeNewsDetector/1.0"})
         if resp.status_code == 200:
             data = resp.json()
             results = data.get("query", {}).get("search", [])
             if results:
                 title = results[0].get("title", "")
                 # Now fetch the summary for this title
-                return search_wikipedia(title, timeout=timeout)
-        return None
-    except Exception:
-        return None
+                return _search_wikipedia_uncached(title, timeout=timeout)
+            return None, True
+        return None, False
+    except Exception as e:
+        logger.warning("Wikipedia search fallback error: %s", _safe_err(e))
+        return None, False
 
 
 def _detect_contradiction(user_text, wiki_description, wiki_extract, wiki_title):
@@ -843,7 +964,8 @@ def _clean_search_query(query):
 def search_gnews(query, max_results=10, timeout=2.0):
     """
     Search GNews API for articles matching the query.
-    Returns a list of article dicts.
+    Returns a list of article dicts, or None if the request failed
+    (an empty list means "no results", and is distinct from an error).
     """
     if not GNEWS_API_KEY:
         return []
@@ -858,7 +980,7 @@ def search_gnews(query, max_results=10, timeout=2.0):
     }
 
     try:
-        response = requests.get(url, params=params, timeout=timeout)
+        response = _http.get(url, params=params, timeout=timeout)
         if response.status_code == 200:
             data = response.json()
             articles = data.get("articles", [])
@@ -870,11 +992,11 @@ def search_gnews(query, max_results=10, timeout=2.0):
                 "published_at": a.get("publishedAt", "")
             } for a in articles]
         else:
-            print(f"GNews API error {response.status_code}")
-            return []
+            logger.warning("GNews API error status %d", response.status_code)
+            return None
     except Exception as e:
-        print(f"GNews error: {e}")
-        return []
+        logger.warning("GNews error: %s", _safe_err(e))
+        return None
 
 
 def search_newsdata(query, max_results=10, timeout=2.0):
@@ -895,7 +1017,7 @@ def search_newsdata(query, max_results=10, timeout=2.0):
     }
 
     try:
-        response = requests.get(url, params=params, timeout=timeout)
+        response = _http.get(url, params=params, timeout=timeout)
         if response.status_code == 200:
             data = response.json()
             results = data.get("results", [])
@@ -909,11 +1031,11 @@ def search_newsdata(query, max_results=10, timeout=2.0):
                 "published_at": a.get("pubDate", "")
             } for a in results if a.get("title")]
         else:
-            print(f"NewsData.io API error {response.status_code}")
-            return []
+            logger.warning("NewsData.io API error status %d", response.status_code)
+            return None
     except Exception as e:
-        print(f"NewsData.io error: {e}")
-        return []
+        logger.warning("NewsData.io error: %s", _safe_err(e))
+        return None
 
 
 def search_newsapi(query, max_results=10, timeout=2.0):
@@ -936,7 +1058,7 @@ def search_newsapi(query, max_results=10, timeout=2.0):
     }
 
     try:
-        response = requests.get(url, params=params, timeout=timeout)
+        response = _http.get(url, params=params, timeout=timeout)
         if response.status_code == 200:
             data = response.json()
             articles = data.get("articles", [])
@@ -948,11 +1070,11 @@ def search_newsapi(query, max_results=10, timeout=2.0):
                 "published_at": a.get("publishedAt", "")
             } for a in articles if a.get("title") and a.get("title") != "[Removed]"]
         else:
-            print(f"NewsAPI.org error {response.status_code}")
-            return []
+            logger.warning("NewsAPI.org error status %d", response.status_code)
+            return None
     except Exception as e:
-        print(f"NewsAPI.org error: {e}")
-        return []
+        logger.warning("NewsAPI.org error: %s", _safe_err(e))
+        return None
 
 
 def search_serpapi(query, max_results=10, timeout=3.0):
@@ -977,7 +1099,7 @@ def search_serpapi(query, max_results=10, timeout=3.0):
     }
 
     try:
-        response = requests.get(url, params=params, timeout=timeout)
+        response = _http.get(url, params=params, timeout=timeout)
         if response.status_code == 200:
             data = response.json()
             articles = []
@@ -1007,14 +1129,14 @@ def search_serpapi(query, max_results=10, timeout=3.0):
                         "published_at": item.get("date", "")
                     })
 
-            print(f"[SerpAPI] Found {len(articles)} articles")
+            logger.info("[SerpAPI] Found %d articles", len(articles))
             return articles
         else:
-            print(f"SerpAPI error {response.status_code}")
-            return []
+            logger.warning("SerpAPI error status %d", response.status_code)
+            return None
     except Exception as e:
-        print(f"SerpAPI error: {e}")
-        return []
+        logger.warning("SerpAPI error: %s", _safe_err(e))
+        return None
 
 
 def _deduplicate_articles(articles):
@@ -1034,56 +1156,80 @@ def _deduplicate_articles(articles):
 
 def search_all_news_sources(query, max_results=10, timeout=2.0):
     """
-    Smart multi-source news search with SerpAPI fallback.
-    
+    Smart multi-source news search with SerpAPI fallback (cached by normalised query).
+
     Strategy:
       1. Run GNews, NewsData.io, NewsAPI.org in PARALLEL (fast, 2s timeout)
       2. If combined results < 3 articles → trigger SerpAPI fallback (Google News)
       3. Deduplicate all articles by title
-    
+
     SerpAPI is the fallback because:
       - It's the most reliable (Google News under the hood)
       - It has the best real-time coverage
       - But it has limited free credits, so we conserve calls
+
+    Results are cached for CACHE_TTL_S unless any source errored (so failures
+    are never cached as "no results").
     """
+    cache_key = ("news", _clean_search_query(query).lower(), max_results)
+    cached = _cache_get(cache_key)
+    if cached is not _MISS:
+        logger.info("[News] cache hit")
+        return list(cached)
+
     all_articles = []
     sources_used = []
+    had_error = False
 
-    # ---- Phase 1: Primary sources in parallel ----
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        futures = {
-            'gnews': executor.submit(search_gnews, query, max_results, timeout),
-            'newsdata': executor.submit(search_newsdata, query, max_results, timeout),
-            'newsapi': executor.submit(search_newsapi, query, max_results, timeout),
-        }
+    # ---- Phase 1: Primary sources in parallel (shared pool, no blocking shutdown) ----
+    futures = {
+        'gnews': _IO_EXECUTOR.submit(search_gnews, query, max_results, timeout),
+        'newsdata': _IO_EXECUTOR.submit(search_newsdata, query, max_results, timeout),
+        'newsapi': _IO_EXECUTOR.submit(search_newsapi, query, max_results, timeout),
+    }
+    futures_wait(list(futures.values()), timeout=timeout + 1)
 
-        for source_name, future in futures.items():
-            try:
-                articles = future.result(timeout=timeout + 1)
-                if articles:
-                    sources_used.append(source_name)
-                    all_articles.extend(articles)
-            except Exception as e:
-                print(f"[News] {source_name} failed: {e}")
+    for source_name, future in futures.items():
+        if not future.done():
+            future.cancel()
+            had_error = True
+            logger.warning("[News] %s timed out", source_name)
+            continue
+        try:
+            articles = future.result()
+        except Exception as e:
+            had_error = True
+            logger.warning("[News] %s failed: %s", source_name, _safe_err(e))
+            continue
+        if articles is None:
+            had_error = True
+        elif articles:
+            sources_used.append(source_name)
+            all_articles.extend(articles)
 
     # Deduplicate after phase 1
     all_articles = _deduplicate_articles(all_articles)
-    print(f"[News] Phase 1: {len(all_articles)} articles from {sources_used}")
+    logger.info("[News] Phase 1: %d articles from %s", len(all_articles), sources_used)
 
     # ---- Phase 2: SerpAPI fallback if results are insufficient ----
     if len(all_articles) < 3 and SERPAPI_KEY:
-        print(f"[News] Phase 1 returned only {len(all_articles)} articles — triggering SerpAPI fallback")
+        logger.info("[News] Phase 1 returned only %d articles — triggering SerpAPI fallback", len(all_articles))
         try:
             serp_articles = search_serpapi(query, max_results=max_results, timeout=3.0)
-            if serp_articles:
+            if serp_articles is None:
+                had_error = True
+            elif serp_articles:
                 sources_used.append('serpapi')
                 all_articles.extend(serp_articles)
                 all_articles = _deduplicate_articles(all_articles)
-                print(f"[News] Phase 2: SerpAPI added {len(serp_articles)} articles, total now {len(all_articles)}")
+                logger.info("[News] Phase 2: SerpAPI added %d articles, total now %d", len(serp_articles), len(all_articles))
         except Exception as e:
-            print(f"[News] SerpAPI fallback failed: {e}")
+            had_error = True
+            logger.warning("[News] SerpAPI fallback failed: %s", _safe_err(e))
 
-    print(f"[News] Final: {len(all_articles)} articles from {sources_used}")
+    logger.info("[News] Final: %d articles from %s", len(all_articles), sources_used)
+    if not had_error:
+        _cache_set(cache_key, list(all_articles))
     return all_articles
 
 
@@ -1117,14 +1263,19 @@ def compute_article_similarity(user_text, articles):
         # Convert to 0-100 scale
         return [round(float(s) * 100, 1) for s in similarities]
     except Exception as e:
-        print(f"Similarity computation error: {e}")
+        logger.warning("Similarity computation error: %s", _safe_err(e))
         return [0.0] * len(articles)
 
 
 def is_trusted_source(source_name):
-    """Check if a source name matches any trusted source."""
-    source_lower = source_name.lower().strip()
-    return any(trusted in source_lower or source_lower in trusted for trusted in TRUSTED_SOURCES)
+    """Check if a source name contains a trusted source name as a whole phrase."""
+    if not isinstance(source_name, str):
+        return False
+    # "BBC-News", "apnews.com", "www.reuters.com" -> space-separated lowercase words
+    normalized = re.sub(r"[^a-z0-9]+", " ", source_name.lower()).strip()
+    if not normalized:
+        return False
+    return any(p.search(normalized) for p in _TRUSTED_SOURCE_PATTERNS)
 
 
 def analyze_verification_results(user_text, articles, similarity_scores):
@@ -1248,33 +1399,20 @@ def _run_transformer(text):
         if local_transformer:
             hf_result = local_transformer(text[:512])
             best_pred = max(hf_result, key=lambda x: x['score'])
-            t_label_raw = best_pred['label']
+            t_label = _normalize_label(best_pred['label'])
             t_conf = best_pred['score']
-
-            if t_label_raw in ["LABEL_1", "1", "REAL"]:
-                t_label = "REAL"
-            elif t_label_raw in ["LABEL_0", "0", "FAKE"]:
-                t_label = "FAKE"
-            else:
-                t_label = "FAKE"
-
             source = "local"
 
         # Fallback to HuggingFace API
         if t_label is None:
             raw_label, raw_conf = get_hf_classification(text)
+            t_label = _normalize_label(raw_label)
             t_conf = raw_conf
-            if raw_label in ["LABEL_1", "1", "REAL"]:
-                t_label = "REAL"
-            elif raw_label in ["LABEL_0", "0", "FAKE"]:
-                t_label = "FAKE"
-            else:
-                t_label = "FAKE"
             source = "remote"
 
         return {"label": t_label, "confidence": round(float(t_conf), 4), "source": source}
     except Exception as e:
-        print(f"Transformer task error: {e}")
+        logger.warning("Transformer task error: %s", _safe_err(e))
         return None
 
 
@@ -1286,11 +1424,11 @@ def _run_hybrid_ml(text):
             h_probs = hybrid_clf.predict_proba(vectorized)[0]
             h_pred_class = np.argmax(h_probs)
             h_conf = float(h_probs[h_pred_class])
-            h_label = hybrid_clf.classes_[h_pred_class]
+            h_label = _normalize_label(hybrid_clf.classes_[h_pred_class])
             return {"label": h_label, "confidence": round(h_conf, 4)}
         return None
     except Exception as e:
-        print(f"Hybrid ML task error: {e}")
+        logger.warning("Hybrid ML task error: %s", _safe_err(e))
         return None
 
 
@@ -1310,7 +1448,7 @@ def _run_linguistic(text):
             "word_count": word_count
         }
     except Exception as e:
-        print(f"Linguistic task error: {e}")
+        logger.warning("Linguistic task error: %s", _safe_err(e))
         return None
 
 
@@ -1324,7 +1462,7 @@ def _run_wikipedia_verification(text, input_type):
     """
     try:
         entity = extract_entity_for_wiki(text)
-        print(f"[Wikipedia] Searching for entity: '{entity}'")
+        logger.info("[Wikipedia] Searching for entity: '%s'", entity)
 
         wiki_data = search_wikipedia(entity, timeout=1.5)
         
@@ -1345,7 +1483,7 @@ def _run_wikipedia_verification(text, input_type):
         if relational_match:
             obj_entity = relational_match.group(2).strip().title()
             if obj_entity.lower() != entity.lower():
-                print(f"[Wikipedia] Also searching for object entity: '{obj_entity}'")
+                logger.info("[Wikipedia] Also searching for object entity: '%s'", obj_entity)
                 wiki_data_obj = search_wikipedia(obj_entity, timeout=1.5)
                 if wiki_data_obj:
                     result_object = verify_against_wikipedia(text, wiki_data_obj)
@@ -1385,7 +1523,7 @@ def _run_wikipedia_verification(text, input_type):
             "wiki_extract": ""
         }
     except Exception as e:
-        print(f"Wikipedia task error: {e}")
+        logger.warning("Wikipedia task error: %s", _safe_err(e))
         return None
 
 
@@ -1393,7 +1531,7 @@ def _run_news_verification(text, input_type):
     """Run multi-source news verification. Always runs for all input types."""
     try:
         claim = extract_main_claim(text)
-        print(f"[News] Searching all sources for: '{claim[:80]}'")
+        logger.info("[News] Searching all sources for: '%s'", claim[:80])
 
         # Search ALL news APIs in parallel
         articles = search_all_news_sources(claim, timeout=2.0)
@@ -1426,8 +1564,54 @@ def _run_news_verification(text, input_type):
             "claim_searched": claim
         }
     except Exception as e:
-        print(f"News verification task error: {e}")
+        logger.warning("News verification task error: %s", _safe_err(e))
         return None
+
+
+# ======================================================================
+# REQUEST VALIDATION & ERROR HANDLERS
+# ======================================================================
+
+def _get_validated_text():
+    """
+    Parse and validate the JSON body. Returns (text, None) on success or
+    (None, (response, status)) on failure.
+    """
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or 'text' not in data:
+        return None, (jsonify({"error": "No text provided"}), 400)
+
+    text = data['text']
+    if not isinstance(text, str):
+        return None, (jsonify({"error": "Text must be a string"}), 400)
+
+    text = text.strip()
+    if not text:
+        return None, (jsonify({"error": "Empty text provided"}), 400)
+    if len(text) > MAX_TEXT_CHARS:
+        return None, (jsonify({"error": f"Text too long (max {MAX_TEXT_CHARS} characters)"}), 413)
+
+    return text, None
+
+
+@app.errorhandler(413)
+def handle_request_too_large(e):
+    return jsonify({"error": "Request too large"}), 413
+
+
+@app.errorhandler(429)
+def handle_rate_limited(e):
+    return jsonify({"error": "Too many requests. Please slow down and try again shortly."}), 429
+
+
+@app.errorhandler(405)
+def handle_method_not_allowed(e):
+    return jsonify({"error": "Method not allowed"}), 405
+
+
+@app.errorhandler(404)
+def handle_not_found(e):
+    return jsonify({"error": "Not found"}), 404
 
 
 # ======================================================================
@@ -1435,6 +1619,7 @@ def _run_news_verification(text, input_type):
 # ======================================================================
 
 @app.route('/', methods=['GET'])
+@limiter.exempt
 def health():
     return jsonify({
         "status": "API is running",
@@ -1446,104 +1631,117 @@ def health():
     }), 200
 
 
+def _timed_task(tracker, name, fn, *args):
+    """Run fn(*args), recording the task's own start/end times in tracker[name]."""
+    entry = tracker[name] = {"start": time.time(), "end": None}
+    try:
+        return fn(*args)
+    finally:
+        entry["end"] = time.time()
+
+
 @app.route('/analyze', methods=['POST'])
+@limiter.limit(RATE_LIMIT)
 def analyze():
     """
-    Unified analysis endpoint — runs ALL tasks in parallel.
-    
+    Unified analysis endpoint — runs ALL tasks in parallel under ONE overall deadline.
+
     Tasks:
       1. Transformer Model
       2. Hybrid ML Model
-      3. Linguistic Analysis
-      4. Clickbait Analysis (part of linguistic)
-      5. Wikipedia Verification
-      6. GNews Verification
-    
-    All tasks execute concurrently via ThreadPoolExecutor.
+      3. Linguistic Analysis (includes clickbait analysis)
+      4. Wikipedia Verification
+      5. News Verification
+
+    Tasks run on a shared thread pool. Anything not finished within
+    ANALYZE_BUDGET_S is reported as "timeout" and does not block the response.
     Returns a unified response with all results.
     """
-    data = request.get_json()
-    if not data or 'text' not in data:
-        return jsonify({"error": "No text provided"}), 400
-
-    text = data['text']
-    if len(text.strip()) == 0:
-        return jsonify({"error": "Empty text provided"}), 400
+    text, err = _get_validated_text()
+    if err:
+        return err
 
     start_time = time.time()
 
     try:
         # Step 1: Classify input type
         input_type = classify_input(text)
-        print(f"\n{'='*60}")
-        print(f"[Analyze] Input type: {input_type} | Length: {len(text.split())} words")
-        print(f"{'='*60}")
+        logger.info("[Analyze] Input type: %s | Length: %d words", input_type, len(text.split()))
 
-        # Step 2: Run ALL tasks in parallel
-        timings = {}
+        # Step 2: Run ALL tasks in parallel on the shared pool
+        tracker = {}
+        task_fns = {
+            'transformer': (_run_transformer, text),
+            'hybrid': (_run_hybrid_ml, text),
+            'linguistic': (_run_linguistic, text),
+            'wikipedia': (_run_wikipedia_verification, text, input_type),
+            'gnews': (_run_news_verification, text, input_type),
+        }
+        futures = {
+            name: _EXECUTOR.submit(_timed_task, tracker, name, fn_args[0], *fn_args[1:])
+            for name, fn_args in task_fns.items()
+        }
+
+        # Step 3: ONE overall deadline for all tasks
+        remaining = max(0.0, ANALYZE_BUDGET_S - (time.time() - start_time))
+        futures_wait(list(futures.values()), timeout=remaining)
+
         results = {}
+        task_status = {}
+        for name, future in futures.items():
+            if not future.done():
+                future.cancel()  # only effective if not yet started
+                task_status[name] = "timeout"
+                results[name] = None
+                logger.warning("[Analyze] Task '%s' timed out after %.1fs budget", name, ANALYZE_BUDGET_S)
+                continue
+            try:
+                results[name] = future.result()
+            except Exception as e:
+                results[name] = None
+                logger.warning("[Analyze] Task '%s' failed: %s", name, _safe_err(e))
+            task_status[name] = "ok" if results[name] is not None else "error"
 
-        with ThreadPoolExecutor(max_workers=6) as executor:
-            task_starts = {}
-            futures = {}
+        # timings = each task's own run duration (elapsed-so-far for tasks still running)
+        now = time.time()
+        timings = {}
+        for name in futures:
+            entry = tracker.get(name)
+            if entry is None:
+                timings[name] = 0.0
+            else:
+                timings[name] = round((entry["end"] or now) - entry["start"], 3)
 
-            # Submit all tasks
-            task_starts['transformer'] = time.time()
-            futures['transformer'] = executor.submit(_run_transformer, text)
-
-            task_starts['hybrid'] = time.time()
-            futures['hybrid'] = executor.submit(_run_hybrid_ml, text)
-
-            task_starts['linguistic'] = time.time()
-            futures['linguistic'] = executor.submit(_run_linguistic, text)
-
-            task_starts['wikipedia'] = time.time()
-            futures['wikipedia'] = executor.submit(_run_wikipedia_verification, text, input_type)
-
-            task_starts['gnews'] = time.time()
-            futures['gnews'] = executor.submit(_run_news_verification, text, input_type)
-
-            # Collect results with timeout
-            for task_name, future in futures.items():
-                try:
-                    results[task_name] = future.result(timeout=5)
-                    timings[task_name] = round(time.time() - task_starts[task_name], 3)
-                except Exception as e:
-                    print(f"[Analyze] Task '{task_name}' failed: {e}")
-                    results[task_name] = None
-                    timings[task_name] = round(time.time() - task_starts[task_name], 3)
-
-        # Step 3: Handle missing model results with fallbacks
         transformer = results.get('transformer')
         hybrid = results.get('hybrid')
         linguistic = results.get('linguistic')
         wikipedia = results.get('wikipedia')
         gnews = results.get('gnews')
 
-        # Fallback: if transformer failed, use hybrid result
+        # All models AND all verification sources failed -> nothing useful to return
+        if transformer is None and hybrid is None and wikipedia is None and gnews is None:
+            logger.error("[Analyze] All models and verification sources failed: %s", task_status)
+            return jsonify({"error": "Analysis service temporarily unavailable"}), 503
+
+        # Step 4: Fallbacks. A failed model reports UNKNOWN; models are never
+        # substituted for each other.
         if transformer is None:
-            if hybrid is not None:
-                transformer = {"label": hybrid["label"], "confidence": hybrid["confidence"], "source": "fallback_lr"}
-            else:
-                transformer = {"label": "UNKNOWN", "confidence": 0.5, "source": "none"}
+            transformer = {"label": "UNKNOWN", "confidence": 0.5, "source": "none"}
 
-        # Fallback: if hybrid failed, use transformer result
         if hybrid is None:
-            if transformer is not None:
-                hybrid = {"label": transformer["label"], "confidence": transformer["confidence"]}
-            else:
-                hybrid = {"label": "UNKNOWN", "confidence": 0.5}
+            hybrid = {"label": "UNKNOWN", "confidence": 0.5}
 
-        # Fallback: if linguistic failed
         if linguistic is None:
             linguistic = {
                 "uppercase": 0, "punctuation": 0,
                 "clickbait": 0, "complexity": 5, "word_count": len(text.split())
             }
 
-        # Step 4: Build response
+        failed_tasks = [name for name, status in task_status.items() if status != "ok"]
+
+        # Step 5: Build response
         total_time = round(time.time() - start_time, 3)
-        print(f"[Analyze] Total time: {total_time}s | Timings: {timings}")
+        logger.info("[Analyze] Total time: %ss | Timings: %s | Status: %s", total_time, timings, task_status)
 
         payload = {
             "input_type": input_type,
@@ -1553,78 +1751,34 @@ def analyze():
             "wikipedia": wikipedia,
             "verification": gnews,
             "timings": timings,
-            "total_time": total_time
+            "total_time": total_time,
+            "task_status": task_status,
+            "degraded": bool(failed_tasks),
+            "failed_tasks": failed_tasks
         }
 
         return jsonify(payload)
 
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        print(f"Analyze Error: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+    except Exception:
+        logger.exception("Analyze error")
+        return jsonify({"error": "Internal server error"}), 500
 
 
 # ---- Legacy Endpoints (backward compatible) ----
 
 @app.route('/predict', methods=['POST'])
+@limiter.limit(RATE_LIMIT)
 def predict():
-    data = request.get_json()
-    if not data or 'text' not in data:
-        return jsonify({"error": "No text provided"}), 400
-
-    text = data['text']
-    if len(text.strip()) == 0:
-        return jsonify({"error": "Empty text provided"}), 400
+    text, err = _get_validated_text()
+    if err:
+        return err
 
     try:
         # 1. TRANSFORMER MODEL PREDICTION
-        t_label = None
-        t_conf = None
-        transformer_source = "none"
-
-        try:
-            if local_transformer:
-                hf_result = local_transformer(text[:512])
-                best_pred = max(hf_result, key=lambda x: x['score'])
-                t_label_raw = best_pred['label']
-                t_conf = best_pred['score']
-
-                if t_label_raw in ["LABEL_1", "1", "REAL"]:
-                    t_label = "REAL"
-                elif t_label_raw in ["LABEL_0", "0", "FAKE"]:
-                    t_label = "FAKE"
-                else:
-                    t_label = "FAKE"
-
-                transformer_source = "local"
-        except Exception as e:
-            print(f"Local transformer error: {str(e)}")
-
-        if t_label is None:
-            try:
-                raw_label, raw_conf = get_hf_classification(text)
-                t_conf = raw_conf
-                if raw_label in ["LABEL_1", "1", "REAL"]:
-                    t_label = "REAL"
-                elif raw_label in ["LABEL_0", "0", "FAKE"]:
-                    t_label = "FAKE"
-                else:
-                    t_label = "FAKE"
-                transformer_source = "remote"
-            except Exception as e:
-                print(f"HF API fallback also failed: {str(e)}")
+        transformer = _run_transformer(text)
 
         # 2. LR + TF-IDF MODEL PREDICTION
-        h_label = None
-        h_conf = None
-
-        if hybrid_clf and tfidf:
-            vectorized = tfidf.transform([text])
-            h_probs = hybrid_clf.predict_proba(vectorized)[0]
-            h_pred_class = np.argmax(h_probs)
-            h_conf = float(h_probs[h_pred_class])
-            h_label = hybrid_clf.classes_[h_pred_class]
+        hybrid = _run_hybrid_ml(text)
 
         # 3. EXTRACT LINGUISTIC FEATURES
         ling_feats, uppercase_ratio, punct_ratio = extract_features(text)
@@ -1632,35 +1786,16 @@ def predict():
         word_count = len(text.split())
         avg_word_length = np.mean([len(w) for w in text.split()]) if word_count > 0 else 0
 
-        # 4. HANDLE MISSING MODELS
-        if t_label is None:
-            if h_label is not None:
-                t_label = h_label
-                t_conf = h_conf
-                transformer_source = "fallback_lr"
-            else:
-                t_label = "UNKNOWN"
-                t_conf = 0.5
-
-        if h_label is None:
-            if t_label is not None:
-                h_label = t_label
-                h_conf = t_conf
-            else:
-                h_label = "UNKNOWN"
-                h_conf = 0.5
+        # 4. HANDLE MISSING MODELS (no cross-copying between models)
+        if transformer is None:
+            transformer = {"label": "UNKNOWN", "confidence": 0.5, "source": "none"}
+        if hybrid is None:
+            hybrid = {"label": "UNKNOWN", "confidence": 0.5}
 
         # 5. BUILD RESPONSE
         payload = {
-            "transformer": {
-                "label": t_label,
-                "confidence": round(float(t_conf), 4),
-                "source": transformer_source
-            },
-            "hybrid": {
-                "label": h_label,
-                "confidence": round(float(h_conf), 4)
-            },
+            "transformer": transformer,
+            "hybrid": hybrid,
             "raw_features": {
                 "uppercase": round(float(uppercase_ratio), 4),
                 "punctuation": round(float(punct_ratio), 4),
@@ -1672,26 +1807,22 @@ def predict():
 
         return jsonify(payload)
 
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+    except Exception:
+        logger.exception("Predict error")
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/verify', methods=['POST'])
+@limiter.limit(RATE_LIMIT)
 def verify():
     """Legacy verify endpoint — kept for backward compatibility."""
-    data = request.get_json()
-    if not data or 'text' not in data:
-        return jsonify({"error": "No text provided"}), 400
-
-    text = data['text']
-    if len(text.strip()) == 0:
-        return jsonify({"error": "Empty text provided"}), 400
+    text, err = _get_validated_text()
+    if err:
+        return err
 
     try:
         claim = extract_main_claim(text)
-        articles = search_gnews(claim, timeout=2.0)
+        articles = search_gnews(claim, timeout=2.0) or []
         similarity_scores = compute_article_similarity(text, articles)
         analysis = analyze_verification_results(text, articles, similarity_scores)
 
@@ -1722,11 +1853,10 @@ def verify():
 
         return jsonify(payload)
 
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
+    except Exception:
+        logger.exception("Verify error")
         return jsonify({
-            "error": str(e),
+            "error": "Verification service unavailable",
             "verification_score": 0,
             "supporting_articles": 0,
             "trusted_source_count": 0,

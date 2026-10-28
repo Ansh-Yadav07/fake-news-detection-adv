@@ -1,128 +1,109 @@
-import React, { useEffect, useRef, useState } from 'react';
-import {
-  Newspaper, ShieldAlert, Zap, Globe, Award,
-  ScanSearch, BarChart3, AlertTriangle, Sparkles
-} from 'lucide-react';
+import React from 'react';
+import { Scale } from 'lucide-react';
+import { Reveal, RevealItem, SectionHeader } from './landing/Reveal';
+import { CHECKS, SIGNAL_COLORS, SIGNAL_LABELS, WEIGHT_PROFILES } from './landing/data';
 
-const useInView = (options = {}) => {
-  const ref = useRef(null);
-  const [isInView, setIsInView] = useState(false);
+const Tag = ({ children }) => (
+  <li className="inline-flex h-6 items-center rounded-md border border-zinc-200/70 bg-zinc-50 px-2 text-[11px] font-medium text-zinc-600">
+    {children}
+  </li>
+);
 
-  useEffect(() => {
-    const observer = new IntersectionObserver(
-      ([entry]) => { if (entry.isIntersecting) setIsInView(true); },
-      { threshold: 0.15, ...options }
-    );
-    if (ref.current) observer.observe(ref.current);
-    return () => observer.disconnect();
-  }, []);
-
-  return [ref, isInView];
-};
-
-const featuresList = [
-  {
-    title: 'Real-Time News Cross-Referencing',
-    desc: 'Searches GNews, NewsData.io, NewsAPI.org in parallel — with SerpAPI (Google News) as a smart fallback when primary sources return insufficient results.',
-    icon: Newspaper,
-    accent: 'bg-emerald-50 text-emerald-600 border-emerald-200',
-  },
-  {
-    title: 'Contradiction Detection',
-    desc: 'Wikipedia verification doesn\'t just match — it actively detects when your claim contradicts established facts, like wrong capitals or debunked theories.',
-    icon: AlertTriangle,
-    accent: 'bg-rose-50 text-rose-600 border-rose-200',
-  },
-  {
-    title: 'Input-Aware Verification',
-    desc: 'Automatically classifies input as a fact claim, news headline, or mixed content — then dynamically adjusts which verification sources carry the most weight.',
-    icon: ScanSearch,
-    accent: 'bg-violet-50 text-violet-600 border-violet-200',
-  },
-  {
-    title: 'Trusted Source Scoring',
-    desc: 'Articles from Reuters, BBC, AP News, The Hindu, NDTV, and other trusted outlets receive priority weighting — a single BBC confirmation outweighs multiple unknown sources.',
-    icon: Award,
-    accent: 'bg-amber-50 text-amber-600 border-amber-200',
-  },
-  {
-    title: 'Parallel Processing Engine',
-    desc: 'All 6 analysis tasks — transformer, ML model, linguistic analysis, Wikipedia, news APIs, and verdict computation — execute concurrently in ~5 seconds.',
-    icon: Zap,
-    accent: 'bg-sky-50 text-sky-600 border-sky-200',
-  },
-  {
-    title: 'Clickbait & Sensationalism Scoring',
-    desc: 'Continuous 0–100% clickbait probability based on trigger words, excessive punctuation, ALL CAPS patterns, and writing style heuristics — not a simple binary flag.',
-    icon: BarChart3,
-    accent: 'bg-orange-50 text-orange-600 border-orange-200',
-  },
-  {
-    title: 'Multi-Verdict Classification',
-    desc: 'Goes beyond just REAL/FAKE — delivers nuanced verdicts: Verified, Verified Fact, Likely Real, Unverified, Suspicious, or Likely Fake with confidence scores.',
-    icon: ShieldAlert,
-    accent: 'bg-indigo-50 text-indigo-600 border-indigo-200',
-  },
-  {
-    title: 'Source-Backed Evidence',
-    desc: 'Every verdict is backed by clickable source articles with similarity scores — so you can verify the verification yourself. Full transparency, no black boxes.',
-    icon: Globe,
-    accent: 'bg-teal-50 text-teal-600 border-teal-200',
-  },
-];
-
-const Features = () => {
-  const [headerRef, headerInView] = useInView();
-
+const CheckCard = ({ check }) => {
+  const { Icon } = check;
   return (
-    <section id="features" className="py-20 px-6 max-w-5xl mx-auto border-t border-black/5">
-      {/* Header */}
-      <div
-        ref={headerRef}
-        className={`text-center mb-14 transition-all duration-700 ease-out ${
-          headerInView ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-6'
-        }`}
-      >
-        <div className="inline-flex items-center gap-2 px-3 py-1.5 mb-5 rounded-full bg-zinc-100 border border-zinc-200 text-xs font-semibold tracking-wide text-zinc-600 shadow-sm">
-          <Sparkles className="w-3.5 h-3.5" />
-          Capabilities
-        </div>
-        <h2 className="text-3xl md:text-4xl font-black tracking-tight text-zinc-900">
-          System Features
-        </h2>
-      </div>
-
-      {/* Feature List */}
-      <div className="flex flex-col gap-3">
-        {featuresList.map((feature, i) => {
-          const [ref, inView] = useInView();
-          const Icon = feature.icon;
-
-          return (
-            <div
-              key={i}
-              ref={ref}
-              className={`flex items-start gap-4 p-5 rounded-2xl border border-transparent transition-all duration-500 ease-out
-                hover:bg-white/60 hover:border-black/5 hover:shadow-md hover:-translate-y-0.5
-                ${inView ? 'opacity-100 translate-x-0' : 'opacity-0 -translate-x-6'}`}
-              style={{ transitionDelay: `${i * 60}ms` }}
-            >
-              {/* Icon */}
-              <div className={`mt-0.5 p-2.5 rounded-xl border shadow-sm flex-shrink-0 transition-transform duration-300 hover:scale-110 ${feature.accent}`}>
-                <Icon className="w-5 h-5" />
-              </div>
-
-              {/* Text */}
-              <div>
-                <h4 className="text-base font-bold text-zinc-900 mb-1">{feature.title}</h4>
-                <p className="text-sm text-zinc-500 leading-relaxed">{feature.desc}</p>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </section>
+    <RevealItem
+      as="li"
+      className="flex flex-col rounded-3xl border border-zinc-200/70 bg-white p-6 shadow-card md:last:col-span-2 lg:last:col-span-1"
+    >
+      <span className={`flex h-10 w-10 items-center justify-center rounded-xl ring-1 ${check.tile}`} aria-hidden="true">
+        <Icon className="h-5 w-5" />
+      </span>
+      <h3 className="mt-5 text-[17px] font-semibold tracking-[-0.01em] text-zinc-950">{check.title}</h3>
+      <p className="mt-2 flex-1 text-sm leading-6 text-zinc-600">{check.desc}</p>
+      <ul className="mt-5 flex flex-wrap gap-1.5" aria-label="Tags">
+        {check.tags.map((t) => (
+          <Tag key={t}>{t}</Tag>
+        ))}
+      </ul>
+    </RevealItem>
   );
 };
+
+const WeightBar = ({ profile }) => {
+  const { Icon } = profile;
+  const summary = profile.weights.map(([k, w]) => `${SIGNAL_LABELS[k]} ${w}%`).join(', ');
+  return (
+    <div>
+      <div className="mb-2 flex items-center gap-2">
+        <Icon className="h-4 w-4 text-zinc-400" aria-hidden="true" />
+        <h4 className="text-[13px] font-semibold text-zinc-800">{profile.label}</h4>
+      </div>
+      <div className="flex h-2.5 gap-[3px] overflow-hidden rounded-full" role="img" aria-label={`${profile.label} weights: ${summary}`}>
+        {profile.weights.map(([k, w]) => (
+          <span key={k} className="h-full" style={{ width: `${w}%`, backgroundColor: SIGNAL_COLORS[k] }} />
+        ))}
+      </div>
+      <ul className="mt-2.5 flex flex-wrap gap-x-4 gap-y-1.5" aria-hidden="true">
+        {profile.weights.map(([k, w]) => (
+          <li key={k} className="inline-flex items-center gap-1.5 text-xs text-zinc-600">
+            <span className="h-2 w-2 rounded-full" style={{ backgroundColor: SIGNAL_COLORS[k] }} />
+            {SIGNAL_LABELS[k]}
+            <span className="font-semibold tabular-nums text-zinc-900">{w}%</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+};
+
+const VerdictEngineCard = () => (
+  <RevealItem
+    as="li"
+    className="relative isolate overflow-hidden rounded-3xl border border-zinc-200/70 bg-white p-6 shadow-hero sm:p-8 md:col-span-2 lg:row-span-2"
+  >
+    <div
+      className="pointer-events-none absolute inset-0 -z-10"
+      aria-hidden="true"
+      style={{ backgroundImage: 'radial-gradient(70% 60% at 100% 0%, rgb(16 185 129 / 0.07) 0%, transparent 65%)' }}
+    />
+    <div className="flex items-start justify-between gap-4">
+      <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-50 text-emerald-700 ring-1 ring-emerald-600/15" aria-hidden="true">
+        <Scale className="h-5 w-5" />
+      </span>
+      <span className="micro-label">Check 6 · Decision</span>
+    </div>
+    <h3 className="mt-5 text-[22px] font-semibold tracking-[-0.02em] text-zinc-950 sm:text-2xl">Input-aware verdict engine</h3>
+    <p className="mt-2 max-w-lg text-sm leading-6 text-zinc-600">
+      Weights shift with the input type, so fact claims lean on Wikipedia and news leans on live coverage.
+      Missing signals are renormalised away, and override rules handle contradictions and trusted-source matches.
+    </p>
+
+    <div className="mt-7 space-y-6 border-t border-zinc-200/70 pt-6">
+      <p className="micro-label">Base weight profiles</p>
+      {WEIGHT_PROFILES.map((p) => (
+        <WeightBar key={p.id} profile={p} />
+      ))}
+    </div>
+  </RevealItem>
+);
+
+const Features = () => (
+  <section id="features" aria-labelledby="features-title" className="scroll-mt-20 border-t border-zinc-200/70">
+    <div className="mx-auto max-w-6xl px-4 py-20 sm:px-6 lg:py-28">
+      <SectionHeader id="features-title" eyebrow="Features" title="Six checks, one transparent verdict">
+        Deep learning, classical ML, style analysis and live cross-referencing, each reported separately so
+        you can see why a verdict was reached.
+      </SectionHeader>
+
+      <Reveal as="ul" stagger className="mt-14 grid gap-4 md:grid-cols-2 lg:mt-16 lg:grid-cols-3 lg:gap-5">
+        <VerdictEngineCard />
+        {CHECKS.map((check) => (
+          <CheckCard key={check.title} check={check} />
+        ))}
+      </Reveal>
+    </div>
+  </section>
+);
 
 export default Features;

@@ -1,3 +1,4 @@
+# Run from the repo root: python scripts/experiments/check_model.py
 import joblib
 import numpy as np
 try:

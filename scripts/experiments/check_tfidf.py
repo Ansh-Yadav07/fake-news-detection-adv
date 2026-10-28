@@ -1,3 +1,4 @@
+# Run from the repo root: python scripts/experiments/check_tfidf.py
 import pickle
 try:
     with open('models/best_model.pkl', 'rb') as f:

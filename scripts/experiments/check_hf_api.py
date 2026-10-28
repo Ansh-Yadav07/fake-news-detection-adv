@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Run from the repo root: python scripts/experiments/check_hf_api.py
 from huggingface_hub import InferenceClient
 import os
 

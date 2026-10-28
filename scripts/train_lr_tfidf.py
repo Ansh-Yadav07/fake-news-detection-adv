@@ -1,3 +1,4 @@
+# Run from the repo root: python scripts/train_lr_tfidf.py
 import pandas as pd
 import pickle
 import os
