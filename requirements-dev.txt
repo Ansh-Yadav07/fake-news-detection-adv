@@ -1,0 +1,15 @@
+# Light test/CI dependency set (used by `pip install -r requirements-dev.txt && pytest -q`).
+# Mirrors the runtime pins in requirements.txt that app.py needs at import time,
+# but deliberately EXCLUDES torch and transformers (too heavy for CI): the test
+# suite stubs the `transformers` module in tests/conftest.py.
+# Keep these pins in sync with requirements.txt.
+pytest==8.3.3
+Flask==3.0.0
+flask-cors==4.0.0
+flask-limiter==3.8.0
+cachetools==5.5.0
+numpy==1.26.4
+scikit-learn==1.8.0
+joblib==1.3.2
+requests==2.31.0
+python-dotenv==1.0.1
