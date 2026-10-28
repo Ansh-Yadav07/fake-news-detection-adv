@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { getApiBase, apiUrl } from './api.js';
+import { getApiBase, apiUrl, getAnalyzeTimeoutMs } from './api.js';
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -56,5 +56,24 @@ describe('apiUrl', () => {
   it('uses getApiBase() by default', () => {
     setEnv('https://env.example.com');
     expect(apiUrl('predict')).toBe('https://env.example.com/predict');
+  });
+});
+
+describe('getAnalyzeTimeoutMs', () => {
+  it('defaults to 90s so a sleeping backend has time to wake', () => {
+    vi.stubEnv('VITE_ANALYZE_TIMEOUT_MS', '');
+    expect(getAnalyzeTimeoutMs()).toBe(90000);
+  });
+
+  it('uses a valid positive override', () => {
+    vi.stubEnv('VITE_ANALYZE_TIMEOUT_MS', '45000');
+    expect(getAnalyzeTimeoutMs()).toBe(45000);
+  });
+
+  it('ignores invalid values', () => {
+    for (const bad of ['abc', '0', '-5']) {
+      vi.stubEnv('VITE_ANALYZE_TIMEOUT_MS', bad);
+      expect(getAnalyzeTimeoutMs()).toBe(90000);
+    }
   });
 });

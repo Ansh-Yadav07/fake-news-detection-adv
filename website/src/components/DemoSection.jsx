@@ -16,7 +16,7 @@ import {
   isWikiContradicted,
   isNewsAvailable,
 } from '../utils/decisionLogic';
-import { apiUrl } from '../utils/api';
+import { apiUrl, getAnalyzeTimeoutMs, warmUpBackend } from '../utils/api';
 
 const INPUT_TYPE_CONFIG = {
   fact_claim: { label: 'Fact Claim', icon: BookOpen, color: 'text-violet-700 bg-violet-50 border-violet-200' },
@@ -26,7 +26,9 @@ const INPUT_TYPE_CONFIG = {
 
 const MIN_CHARS = 10;
 const MAX_CHARS = 10000;
-const REQUEST_TIMEOUT_MS = 30000;
+const REQUEST_TIMEOUT_MS = getAnalyzeTimeoutMs();
+// The backend answers within ~8s when awake; longer usually means a cold start
+const SLOW_RESPONSE_MS = 10000;
 
 const EXAMPLES = [
   { label: 'Fact claim', text: 'Paris is the capital of France.' },
@@ -104,6 +106,11 @@ const DemoSection = () => {
   // Abort any in-flight request on unmount
   useEffect(() => () => abortRef.current?.abort(), []);
 
+  // Start waking a sleeping backend while the user is still typing
+  useEffect(() => {
+    warmUpBackend();
+  }, []);
+
   // Move focus to the verdict once a fresh result has rendered
   useEffect(() => {
     if (!result || !shouldFocusResultRef.current) return;
@@ -132,6 +139,11 @@ const DemoSection = () => {
       timedOut = true;
       controller.abort('timeout');
     }, REQUEST_TIMEOUT_MS);
+    const slowId = setTimeout(() => {
+      if (isCurrent()) {
+        setLoadingPhase('Still working — the server may be waking up. The first request can take up to a minute.');
+      }
+    }, SLOW_RESPONSE_MS);
 
     const text = trimmed;
     setLoading(true);
@@ -274,7 +286,7 @@ const DemoSection = () => {
       if (!isCurrent()) return;
       if (controller.signal.aborted) {
         if (timedOut) {
-          setError(`The analysis took longer than ${REQUEST_TIMEOUT_MS / 1000} seconds and was stopped. The server may be busy — please try again.`);
+          setError(`The analysis took longer than ${Math.round(REQUEST_TIMEOUT_MS / 1000)} seconds and was stopped. The server may still be starting up — please try again in a moment.`);
         }
         // User-cancelled: no error message
       } else {
@@ -283,6 +295,7 @@ const DemoSection = () => {
       }
     } finally {
       clearTimeout(timeoutId);
+      clearTimeout(slowId);
       if (isCurrent()) {
         setLoading(false);
         setLoadingPhase('');
