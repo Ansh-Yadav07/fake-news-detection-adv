@@ -1,99 +1,63 @@
 import React from 'react';
 import AnalysisCard from './AnalysisCard';
-import { BarChart2 } from 'lucide-react';
+import Meter from './Meter';
+import { Cpu } from 'lucide-react';
+import { isUnknownModel } from './verdictTheme';
 
-const CircularGauge = ({ label, value, color, trackColor, size, strokeWidth }) => {
-  const radius = (size - strokeWidth) / 2;
-  const circumference = 2 * Math.PI * radius;
-  const percentage = Math.min(100, Math.max(0, value));
-  const offset = circumference - (percentage / 100) * circumference;
-  const center = size / 2;
+const PREDICTION_STYLES = {
+  REAL: { pill: 'bg-emerald-50 text-emerald-700 ring-emerald-600/15', color: '#059669' },
+  FAKE: { pill: 'bg-red-50 text-red-700 ring-red-600/15', color: '#dc2626' },
+};
+const NEUTRAL = { pill: 'bg-zinc-100 text-zinc-600 ring-zinc-500/15', color: '#52525b' };
+
+const ModelRow = ({ name, description, label, confidence }) => {
+  const unavailable = isUnknownModel(label);
+  const prediction = unavailable ? null : String(label).trim().toUpperCase();
+  const style = PREDICTION_STYLES[prediction] || NEUTRAL;
+  const pct = Math.round(Math.min(100, Math.max(0, Number(confidence) || 0)));
 
   return (
-    <div className="flex flex-col items-center gap-1 md:gap-2">
-      <div className="relative" style={{ width: size, height: size }}>
-        <svg width={size} height={size} className="transform -rotate-90">
-          {/* Track */}
-          <circle
-            cx={center}
-            cy={center}
-            r={radius}
-            fill="none"
-            stroke={trackColor}
-            strokeWidth={strokeWidth}
-            strokeLinecap="round"
-          />
-          {/* Progress */}
-          <circle
-            cx={center}
-            cy={center}
-            r={radius}
-            fill="none"
-            stroke={color}
-            strokeWidth={strokeWidth}
-            strokeLinecap="round"
-            strokeDasharray={circumference}
-            strokeDashoffset={offset}
-            className="gauge-progress"
-          />
-        </svg>
-        {/* Center text */}
-        <div className="absolute inset-0 flex flex-col items-center justify-center">
-          <span className="text-base md:text-2xl font-black text-zinc-900 leading-none">
-            {Math.round(value)}
-          </span>
-          <span className="text-[8px] md:text-[10px] font-semibold text-zinc-400 uppercase tracking-wider">%</span>
+    <li className="py-4 first:pt-0 last:pb-0">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <p className="text-sm font-medium text-zinc-900">{name}</p>
+          <p className="mt-0.5 text-xs text-zinc-500">{description}</p>
         </div>
+        {unavailable ? (
+          <span className="text-sm font-medium text-zinc-400">Unavailable</span>
+        ) : (
+          <span className="flex items-start font-semibold leading-none tracking-tight text-zinc-950 tabular-nums">
+            <span className="text-2xl">{pct}</span>
+            <span className="ml-0.5 mt-0.5 text-sm text-zinc-400">%</span>
+          </span>
+        )}
       </div>
-      <span className="text-[9px] md:text-xs font-semibold text-zinc-600 text-center leading-tight">{label}</span>
-    </div>
+      <div className="mt-3 flex items-center gap-3">
+        <Meter
+          className="flex-1"
+          percent={pct}
+          color={style.color}
+          label={`${name} confidence`}
+          valueText={unavailable ? undefined : `${pct}% ${prediction}`}
+          unavailable={unavailable}
+        />
+        <span
+          className={`inline-flex h-6 min-w-[3.5rem] items-center justify-center rounded-md px-2 text-[11px] font-semibold uppercase tracking-[0.06em] ring-1 ${style.pill}`}
+        >
+          {unavailable ? 'Offline' : prediction}
+        </span>
+      </div>
+    </li>
   );
 };
 
-const ChartSection = ({ transformerConf, hybridConf }) => {
-  // Use window check for SSR safety, but we'll use CSS-driven sizing via a wrapper
-  return (
-    <AnalysisCard title="Confidence Models" icon={BarChart2}>
-      {/* Mobile layout */}
-      <div className="flex md:hidden items-center justify-around h-full py-1">
-        <CircularGauge
-          label="Transformer"
-          value={transformerConf}
-          color="#18181b"
-          trackColor="#f4f4f5"
-          size={72}
-          strokeWidth={7}
-        />
-        <CircularGauge
-          label="Hybrid ML"
-          value={hybridConf}
-          color="#71717a"
-          trackColor="#f4f4f5"
-          size={72}
-          strokeWidth={7}
-        />
-      </div>
-      {/* Desktop layout */}
-      <div className="hidden md:flex items-center justify-around h-full py-3">
-        <CircularGauge
-          label="Transformer"
-          value={transformerConf}
-          color="#18181b"
-          trackColor="#f4f4f5"
-          size={110}
-          strokeWidth={10}
-        />
-        <CircularGauge
-          label="Hybrid ML"
-          value={hybridConf}
-          color="#71717a"
-          trackColor="#f4f4f5"
-          size={110}
-          strokeWidth={10}
-        />
-      </div>
-    </AnalysisCard>
-  );
-};
+const ChartSection = ({ transformerConf, hybridConf, transformerLabel, hybridLabel }) => (
+  <AnalysisCard title="Model confidence" subtitle="Each model's certainty in its own prediction" icon={Cpu}>
+    <ul className="divide-y divide-zinc-200/70">
+      <ModelRow name="Transformer" description="Fine-tuned language model" label={transformerLabel} confidence={transformerConf} />
+      <ModelRow name="Hybrid ML" description="Logistic regression on text features" label={hybridLabel} confidence={hybridConf} />
+    </ul>
+  </AnalysisCard>
+);
 
 export default ChartSection;

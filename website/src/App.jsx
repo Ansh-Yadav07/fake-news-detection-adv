@@ -4,7 +4,7 @@ import Footer from './components/Footer';
 import LandingPage from './pages/LandingPage';
 import AnalysisPage from './pages/AnalysisPage';
 import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom';
-import { AnimatePresence, motion } from 'framer-motion';
+import { AnimatePresence, MotionConfig, motion } from 'framer-motion';
 
 function ScrollToTop() {
   const { pathname } = useLocation();
@@ -53,16 +53,18 @@ function AnimatedRoutes() {
 
 function App() {
   return (
-    <BrowserRouter>
-      <ScrollToTop />
-      <div className="min-h-screen flex flex-col font-sans text-zinc-900 bg-[#f5f5f6]">
-        <Navbar />
-        <main className="flex-grow pt-[5rem] relative overflow-hidden">
-          <AnimatedRoutes />
-        </main>
-        <Footer />
-      </div>
-    </BrowserRouter>
+    <MotionConfig reducedMotion="user">
+      <BrowserRouter>
+        <ScrollToTop />
+        <div className="min-h-screen flex flex-col font-sans text-zinc-900 bg-[#f5f5f6]">
+          <Navbar />
+          <main className="flex-grow pt-16 relative overflow-hidden">
+            <AnimatedRoutes />
+          </main>
+          <Footer />
+        </div>
+      </BrowserRouter>
+    </MotionConfig>
   );
 }
 
