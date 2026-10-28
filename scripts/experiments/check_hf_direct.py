@@ -1,3 +1,4 @@
+# Run from the repo root: python scripts/experiments/check_hf_direct.py
 from huggingface_hub import InferenceClient
 import os
 from dotenv import load_dotenv
