@@ -49,8 +49,21 @@ DEFAULT_ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 ]
+def _parse_origin(origin):
+    """Exact origin, or a '*' wildcard (one DNS label segment) compiled to an anchored regex.
+
+    e.g. "https://myapp-*.vercel.app" matches Vercel preview URLs but never
+    "https://myapp-x.vercel.app.evil.com".
+    """
+    if "*" not in origin:
+        return origin
+    pattern = "".join("[a-z0-9-]+" if part == "*" else re.escape(part)
+                      for part in re.split(r"(\*)", origin))
+    return re.compile(rf"^{pattern}$", re.IGNORECASE)
+
+
 ALLOWED_ORIGINS = [
-    o.strip().rstrip('/')
+    _parse_origin(o.strip().rstrip('/'))
     for o in os.environ.get("ALLOWED_ORIGINS", "").split(",")
     if o.strip()
 ] or DEFAULT_ALLOWED_ORIGINS
@@ -235,20 +248,30 @@ except FileNotFoundError as e:
 except Exception as e:
     logger.error("Error loading ML models: %s: %s", type(e).__name__, e)
 
+def _load_transformer(model, **kwargs):
+    return pipeline("text-classification", model=model, max_length=512, truncation=True, **kwargs)
+
+
 try:
     if os.path.exists(TRANSFORMER_MODEL_PATH):
-        local_transformer = pipeline(
-            "text-classification",
-            model=TRANSFORMER_MODEL_PATH,
-            tokenizer=TRANSFORMER_MODEL_PATH,
-            max_length=512,
-            truncation=True
-        )
+        local_transformer = _load_transformer(TRANSFORMER_MODEL_PATH, tokenizer=TRANSFORMER_MODEL_PATH)
         logger.info("Local Transformer loaded successfully")
     else:
-        logger.warning("Local transformer path '%s' not found. Will attempt HuggingFace Inference API as fallback.", TRANSFORMER_MODEL_PATH)
+        logger.warning("Local transformer path '%s' not found.", TRANSFORMER_MODEL_PATH)
 except Exception as e:
-    logger.warning("Could not load local transformer (%s: %s). Will attempt HuggingFace Inference API as fallback.", type(e).__name__, e)
+    logger.warning("Could not load local transformer (%s: %s).", type(e).__name__, e)
+
+# The serverless HF Inference API no longer serves this model, so when the
+# weights aren't on disk, download them from the Hub once (cached in HF_HOME)
+# and run locally. Set LOAD_TRANSFORMER_FROM_HUB=0 to skip on low-memory hosts.
+if local_transformer is None and os.environ.get("LOAD_TRANSFORMER_FROM_HUB", "1") != "0":
+    try:
+        logger.info("Loading transformer '%s' from the Hugging Face Hub...", HF_MODEL_ID)
+        local_transformer = _load_transformer(HF_MODEL_ID, token=HF_TOKEN or None)
+        logger.info("Transformer loaded from the Hub")
+    except Exception as e:
+        logger.warning("Could not load transformer from the Hub (%s). Falling back to the Inference API.",
+                       _safe_err(e))
 
 if not hybrid_clf:
     logger.warning("ML model will not be available")
@@ -409,7 +432,8 @@ def get_hf_classification(text, max_retries=1):
         raise RuntimeError("HF_TOKEN is not configured")
 
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL_ID}"
+    # api-inference.huggingface.co was retired; the router is its replacement
+    API_URL = f"https://router.huggingface.co/hf-inference/models/{HF_MODEL_ID}"
     deadline = time.time() + HF_TIMEOUT_S
 
     for attempt in range(max_retries + 1):
