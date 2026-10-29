@@ -202,3 +202,13 @@ def test_cors_allowed_origin_gets_header(client):
 def test_cors_disallowed_origin_gets_no_header(client):
     r = _preflight(client, "http://evil.example")
     assert r.headers.get("Access-Control-Allow-Origin") is None
+
+
+def test_wildcard_origin_matches_one_label_only(A):
+    pattern = A._parse_origin("https://myapp-*.vercel.app")
+    assert pattern.match("https://myapp-git-feature-abc123.vercel.app")
+    assert pattern.match("https://MYAPP-x1.vercel.app")
+    assert not pattern.match("https://myapp-x.vercel.app.evil.com")
+    assert not pattern.match("https://evil.com/https://myapp-x.vercel.app")
+    assert not pattern.match("https://myapp-a.b.vercel.app")
+    assert A._parse_origin("https://example.com") == "https://example.com"
