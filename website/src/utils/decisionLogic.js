@@ -38,10 +38,14 @@
  *       (2/2b downgrade to LIKELY REAL when ML fake score > 0.8 or clickbait > 60.)
  *   2c. News score > 25% and ≥ 3 supporting articles → LIKELY REAL
  *       (skipped when ML fake score > 0.8 or clickbait > 60).
+ *   3a. Clickbait > 60 with no corroboration (Wikipedia score ≥ 50%, or news
+ *       score ≥ 25% or a trusted source) → LIKELY FAKE when either model is
+ *       ≥ 80% sure it is fake, otherwise SUSPICIOUS.
  *   3. No evidence → UNVERIFIED (reason notes the ML lean). LIKELY FAKE only
  *      when ML is strongly fake (mlRealScore < 0.2) and the combined score < 0.5.
+ *      A weak news match (score < 25%, no trusted source) is not evidence.
  *   4. Weighted decision on the renormalised score. Positive verdicts are
- *      downgraded one step when ML fake score > 0.8 (conflicting signals).
+ *      downgraded one step when ML fake score > 0.8 or clickbait > 60.
  *
  * Verdict categories: VERIFIED, VERIFIED FACT, LIKELY REAL, UNVERIFIED, SUSPICIOUS, LIKELY FAKE
  *
@@ -81,6 +85,10 @@ const MIXED_WEIGHTS = {
 // Thresholds for "strong fake signals" that block evidence-based overrides
 const STRONG_ML_FAKE = 0.80;
 const STRONG_CLICKBAIT = 60;
+
+// Below these, an online match is too weak to count as corroboration
+const MIN_NEWS_EVIDENCE = 0.25;
+const MIN_WIKI_CORROBORATION = 0.50;
 
 // ---------------------------------------------------------------------------
 // Input sanitising
@@ -505,7 +513,13 @@ export function getEnhancedDecisionWithVerification(
   const credibilityScore = Math.min(1.0, trustedCount / 4);
 
   const strongMlFake = mlFakeScore !== null && mlFakeScore > STRONG_ML_FAKE;
-  const strongFakeSignals = strongMlFake || clickbait_score > STRONG_CLICKBAIT;
+  const strongClickbait = clickbait_score > STRONG_CLICKBAIT;
+  const strongFakeSignals = strongMlFake || strongClickbait;
+  const meaningfulNews = newsAvailable && (gnewsScore >= MIN_NEWS_EVIDENCE || trustedCount >= 1);
+  const corroborated = meaningfulNews || (wikiAvailable && wikiScore >= MIN_WIKI_CORROBORATION);
+  // Either model alone: the two can disagree, and the blend would hide a confident fake call
+  const modelFlagsFake = (ml.tValid && t_label === "FAKE" && t_conf >= STRONG_ML_FAKE) ||
+                         (ml.hValid && h_label === "FAKE" && h_conf >= STRONG_ML_FAKE);
 
   // ---- Select weight profile; fall back to MIXED when the primary source is missing ----
   let profileType = inputType === "fact_claim" || inputType === "news_article" ? inputType : "mixed";
@@ -627,8 +641,20 @@ export function getEnhancedDecisionWithVerification(
     confidence = Math.max(finalRealScore, 0.75);
     reason = `${supportingCount} online sources report similar content. Verification score: ${num(verification.verification_score)}%.`;
   }
+  // RULE 3a: Heavy clickbait that nothing online backs up is never a positive verdict
+  else if (strongClickbait && !corroborated) {
+    if (modelFlagsFake) {
+      final_label = "LIKELY FAKE";
+      confidence = Math.max(1 - finalRealScore, 0.7);
+      reason = `Heavy clickbait patterns (${clickbait_score}%), an AI model flags this as fake, and no reliable source backs it up.`;
+    } else {
+      final_label = "SUSPICIOUS";
+      confidence = Math.max(1 - finalRealScore, 0.6);
+      reason = `Heavy clickbait patterns (${clickbait_score}%) and no reliable source backs this up. Writing style alone cannot prove it is fake, so check it carefully.`;
+    }
+  }
   // RULE 3: No verification evidence — never fake purely from absence of evidence
-  else if (!wikiAvailable && !newsAvailable) {
+  else if (!wikiAvailable && !meaningfulNews) {
     if (ml.available && mlRealScore < 0.2 && finalRealScore < 0.5) {
       final_label = "LIKELY FAKE";
       confidence = 1 - finalRealScore;
@@ -670,11 +696,11 @@ export function getEnhancedDecisionWithVerification(
     }
 
     // Conflicting signals: partial evidence vs. strong ML fake → downgrade one step
-    if (strongMlFake && (final_label === "VERIFIED" || final_label === "VERIFIED FACT")) {
+    if (strongFakeSignals && (final_label === "VERIFIED" || final_label === "VERIFIED FACT")) {
       final_label = "LIKELY REAL";
       confidence = Math.min(confidence, 0.7);
       reason += ` Downgraded: ${strongFakeNote()}.`;
-    } else if (strongMlFake && final_label === "LIKELY REAL") {
+    } else if (strongFakeSignals && final_label === "LIKELY REAL") {
       final_label = "UNVERIFIED";
       confidence = 0.5;
       reason = `Conflicting evidence: partial online support was found${wikiAvailable ? ' (Wikipedia contains related information)' : ''}, but ${strongFakeNote()}. The claim could not be verified.`;

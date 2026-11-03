@@ -188,3 +188,51 @@ describe('invariants', () => {
     expect(strong.final_label).toBe('LIKELY FAKE');
   });
 });
+
+describe('clickbait without corroboration', () => {
+  // The reported case: 17 words, clickbait 89, uppercase 19, punctuation 6, one weak news match
+  const weakNews = { verification_score: 3.2, supporting_articles: 1, trusted_source_count: 0 };
+  const shout = (t, tc, h, hc, wiki = NF, news = weakNews) =>
+    getEnhancedDecisionWithVerification(t, tc, h, hc, 89, 6, 19, 17, 'mixed', wiki, news);
+
+  it('is SUSPICIOUS when the only working model says REAL', () => {
+    expect(shout('UNKNOWN', 0.5, 'REAL', 0.99).final_label).toBe('SUSPICIOUS');
+  });
+
+  it('is LIKELY FAKE when either model is confident it is fake, even if the other disagrees', () => {
+    expect(shout('FAKE', 0.999, 'REAL', 0.99).final_label).toBe('LIKELY FAKE');
+    expect(shout('REAL', 0.99, 'FAKE', 0.9).final_label).toBe('LIKELY FAKE');
+  });
+
+  it('applies with no news at all, and with a weak Wikipedia match', () => {
+    expect(shout('UNKNOWN', 0.5, 'REAL', 0.99, NF, noNews).final_label).toBe('SUSPICIOUS');
+    const weakWiki = { status: 'PARTIALLY VERIFIED', verification_score: 30 };
+    expect(shout('UNKNOWN', 0.5, 'REAL', 0.99, weakWiki, noNews).final_label).toBe('SUSPICIOUS');
+  });
+
+  it('does not apply at the clickbait threshold', () => {
+    const d = getEnhancedDecisionWithVerification('UNKNOWN', 0.5, 'REAL', 0.99, 60, 6, 19, 17, 'mixed', NF, noNews);
+    expect(d.final_label).toBe('UNVERIFIED');
+  });
+
+  it('real coverage still wins: a trusted source or solid match is not treated as fake', () => {
+    const trusted = { verification_score: 60, supporting_articles: 2, trusted_source_count: 1 };
+    expect(shout('UNKNOWN', 0.5, 'REAL', 0.99, NF, trusted).final_label).toBe('LIKELY REAL');
+    const solid = { verification_score: 40, supporting_articles: 1, trusted_source_count: 0 };
+    expect(NOT_FAKE).not.toContain(shout('UNKNOWN', 0.5, 'REAL', 0.99, NF, solid).final_label);
+  });
+});
+
+describe('weak news match', () => {
+  it('is not evidence: clean text with a 3% match stays UNVERIFIED', () => {
+    const weak = { verification_score: 3, supporting_articles: 1, trusted_source_count: 0 };
+    const d = decide(M('UNKNOWN', 0.5, 'REAL', .99), clean, 'mixed', article, NF, weak);
+    expect(d.final_label).toBe('UNVERIFIED');
+  });
+
+  it('a corroborated clickbait headline cannot be VERIFIED by the weighted score', () => {
+    const news = { verification_score: 45, supporting_articles: 2, trusted_source_count: 0 };
+    const d = decide(M('REAL', .99, 'REAL', .99), { clickbait: .7, uppercase: 0, punctuation: 0 }, 'mixed', article, NF, news);
+    expect(NOT_REAL.slice(0, 3)).not.toContain(d.final_label);
+  });
+});
