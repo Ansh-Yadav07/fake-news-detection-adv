@@ -3,8 +3,9 @@ import time
 
 import pytest
 
-from conftest import GOOD_WIKI
+from conftest import GOOD_WIKI, app_module
 
+REAL_RUN_TRANSFORMER = app_module._run_transformer  # the isolate fixture stubs it per test
 LEGACY_KEYS = ["input_type", "transformer", "hybrid", "raw_features", "wikipedia",
                "verification", "timings", "total_time"]
 
@@ -186,6 +187,76 @@ def test_predict_happy_path(client, sample_text):
     d = r.get_json()
     assert r.status_code == 200
     assert {"transformer", "hybrid", "raw_features"} <= set(d)
+
+
+# ---- deployed transformer ----
+COMPLETE_EVENT = ['event: complete',
+                  'data: [[{"label": "LABEL_0", "score": 0.2}, {"label": "LABEL_1", "score": 0.8}]]']
+
+
+class _FakeResponse:
+    def __init__(self, lines=()):
+        self.lines = lines
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return {"event_id": "abc"}
+
+    def iter_lines(self, decode_unicode=False):
+        return iter(self.lines)
+
+
+class _FakeHttp:
+    def __init__(self, lines=COMPLETE_EVENT):
+        self.lines, self.urls, self.headers = lines, [], []
+
+    def post(self, url, headers=None, json=None, timeout=None):
+        self.urls.append(url)
+        self.headers.append(headers)
+        return _FakeResponse()
+
+    def get(self, url, headers=None, stream=False, timeout=None):
+        self.urls.append(url)
+        self.headers.append(headers)
+        return _FakeResponse(self.lines)
+
+
+@pytest.mark.parametrize("url,token,expected_headers", [
+    ("https://me-api.hf.space", "", {}),
+    ("https://me-api.hf.space", "tok", {"Authorization": "Bearer tok"}),
+    ("https://example.com", "tok", {}),
+])
+def test_transformer_space_is_called_and_token_stays_on_hf(A, monkeypatch, url, token, expected_headers):
+    http = _FakeHttp()
+    monkeypatch.setattr(A, "_http", http)
+    monkeypatch.setattr(A, "TRANSFORMER_API_URL", url)
+    monkeypatch.setattr(A, "HF_TOKEN", token)
+    assert A.get_hf_classification("text") == ("LABEL_1", 0.8)
+    assert http.urls == [f"{url}/gradio_api/call/predict", f"{url}/gradio_api/call/predict/abc"]
+    assert http.headers == [expected_headers, expected_headers]
+
+
+@pytest.mark.parametrize("lines", [["event: error", "data: null"], ["event: heartbeat", "data: null"]])
+def test_transformer_space_failure_raises(A, monkeypatch, lines):
+    monkeypatch.setattr(A, "_http", _FakeHttp(lines))
+    monkeypatch.setattr(A, "TRANSFORMER_API_URL", "https://me-api.hf.space")
+    with pytest.raises(RuntimeError):
+        A.get_hf_classification("text")
+
+
+def test_remote_transformer_result_reports_remote_source(A, monkeypatch):
+    monkeypatch.setattr(A, "_http", _FakeHttp())
+    monkeypatch.setattr(A, "TRANSFORMER_API_URL", "https://me-api.hf.space")
+    monkeypatch.setattr(A, "local_transformer", None)
+    assert REAL_RUN_TRANSFORMER("text") == {"label": "REAL", "confidence": 0.8, "source": "remote"}
 
 
 # ---- CORS ----

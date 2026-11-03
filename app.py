@@ -3,6 +3,7 @@ import numpy as np
 import string
 import re
 import joblib
+import json
 import requests
 import time
 import logging
@@ -19,7 +20,6 @@ from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from werkzeug.middleware.proxy_fix import ProxyFix
-from transformers import pipeline
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -102,6 +102,8 @@ NEWSDATA_API_KEY = os.environ.get("NEWSDATA_API_KEY", "")
 NEWSAPI_KEY = os.environ.get("NEWSAPI_KEY", "")
 SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "")
 HF_MODEL_ID = "anshy047/fake-news-detector-transformer"
+# A deployed transformer (hf-space/ or an Inference Endpoint); replaces loading it in-process
+TRANSFORMER_API_URL = os.environ.get("TRANSFORMER_API_URL", "").strip().rstrip("/")
 
 # ---- Timing budgets / concurrency (env-overridable) ----
 ANALYZE_BUDGET_S = float(os.environ.get("ANALYZE_BUDGET_S", "8"))
@@ -249,11 +251,15 @@ except Exception as e:
     logger.error("Error loading ML models: %s: %s", type(e).__name__, e)
 
 def _load_transformer(model, **kwargs):
+    # Imported here because torch is memory heavy and slows startup when the model is remote
+    from transformers import pipeline
     return pipeline("text-classification", model=model, max_length=512, truncation=True, **kwargs)
 
 
 try:
-    if os.path.exists(TRANSFORMER_MODEL_PATH):
+    if TRANSFORMER_API_URL:
+        logger.info("Using the deployed transformer at %s", TRANSFORMER_API_URL)
+    elif os.path.exists(TRANSFORMER_MODEL_PATH):
         local_transformer = _load_transformer(TRANSFORMER_MODEL_PATH, tokenizer=TRANSFORMER_MODEL_PATH)
         logger.info("Local Transformer loaded successfully")
     else:
@@ -264,7 +270,7 @@ except Exception as e:
 # The serverless HF Inference API no longer serves this model, so when the
 # weights aren't on disk, download them from the Hub once (cached in HF_HOME)
 # and run locally. Set LOAD_TRANSFORMER_FROM_HUB=0 to skip on low-memory hosts.
-if local_transformer is None and os.environ.get("LOAD_TRANSFORMER_FROM_HUB", "1") != "0":
+if local_transformer is None and not TRANSFORMER_API_URL and os.environ.get("LOAD_TRANSFORMER_FROM_HUB", "1") != "0":
     try:
         logger.info("Loading transformer '%s' from the Hugging Face Hub...", HF_MODEL_ID)
         local_transformer = _load_transformer(HF_MODEL_ID, token=HF_TOKEN or None)
@@ -419,6 +425,42 @@ def extract_features(text):
 # HUGGINGFACE INFERENCE API (FALLBACK)
 # ======================================================================
 
+def _call_transformer_space(text):
+    """Call the Gradio Space in hf-space/: POST starts a job, GET streams its result as SSE."""
+    url = f"{TRANSFORMER_API_URL}/gradio_api/call/predict"
+    # Only Hugging Face hosts get the token, so a mistyped URL can't leak it.
+    # It also bills ZeroGPU usage to the account's larger daily quota.
+    host = urllib.parse.urlparse(url).hostname or ""
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN and host.endswith(".hf.space") else {}
+    deadline = time.time() + HF_TIMEOUT_S
+
+    try:
+        start = _http.post(url, headers=headers, json={"data": [text[:512]]}, timeout=HF_TIMEOUT_S)
+        start.raise_for_status()
+        event_id = start.json()["event_id"]
+
+        remaining = deadline - time.time()
+        if remaining <= 0.25:
+            raise RuntimeError("Transformer Space time budget exhausted")
+        with _http.get(f"{url}/{event_id}", headers=headers, stream=True, timeout=remaining) as stream:
+            stream.raise_for_status()
+            event = None
+            for line in stream.iter_lines(decode_unicode=True):
+                if time.time() > deadline:
+                    raise RuntimeError("Transformer Space time budget exhausted")
+                if line.startswith("event:"):
+                    event = line[len("event:"):].strip()
+                elif line.startswith("data:") and event == "error":
+                    raise RuntimeError("Transformer Space returned an error")
+                elif line.startswith("data:") and event == "complete":
+                    predictions = json.loads(line[len("data:"):])[0]
+                    best = max(predictions, key=lambda x: x.get('score', 0))
+                    return best.get('label', 'UNKNOWN'), best.get('score', 0.5)
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"Transformer Space request failed: {type(e).__name__}")
+    raise RuntimeError("Transformer Space ended without a result")
+
+
 def get_hf_classification(text, max_retries=1):
     """
     Call HuggingFace Inference API as a fallback when local transformer is unavailable.
@@ -428,6 +470,9 @@ def get_hf_classification(text, max_retries=1):
     budget), at most `max_retries` retry, and no sleeping. A loading model (503) or a
     timeout is not retried.
     """
+    if TRANSFORMER_API_URL:
+        return _call_transformer_space(text)
+
     if not HF_TOKEN:
         raise RuntimeError("HF_TOKEN is not configured")
 
@@ -1650,7 +1695,7 @@ def health():
         "models": {
             "lr_tfidf": hybrid_clf is not None,
             "transformer_local": local_transformer is not None,
-            "transformer_remote": bool(HF_TOKEN)
+            "transformer_remote": bool(TRANSFORMER_API_URL or HF_TOKEN)
         }
     }), 200
 
